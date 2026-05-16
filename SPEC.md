@@ -107,15 +107,16 @@ hira-agent/
 │       ├── run-tests/
 │       ├── web-research/
 │       └── ...
-├── runtime/
-│   ├── orchestrator/            # top-level loop, intent routing
-│   ├── session/                 # Claude Code session manager
-│   ├── bus/                     # inter-agent message bus
-│   ├── state/                   # task graph, run journal
-│   ├── memory/                  # long-term memory backend
-│   ├── transport/               # CLI / HTTP / SDK surfaces
-│   └── config/                  # settings, model selection, budgets
-├── spec/                        # design docs (this file lives here later)
+├── packages/                    # pnpm workspace
+│   ├── plugin-loader/           # @hira/plugin-loader  (zod-validated manifests)
+│   ├── session/                 # @hira/session        (claude CLI subprocess driver)
+│   ├── mcp-skills/              # @hira/mcp-skills     (built-in MCP server: memory, handoff, journal)
+│   ├── memory/                  # @hira/memory         (SQLite + vector store)
+│   ├── runtime/                 # @hira/runtime        (orchestrator, bus, state, run journal)
+│   └── cli/                     # @hira/cli            (`hira` user-facing CLI)
+├── .hira/                       # runtime artefacts (gitignored)
+│   ├── runs/<run_id>/           # per-run journals, per-agent settings + mcp configs
+│   └── memory/                  # SQLite + vector index
 └── examples/                    # sample tasks / fixtures
 ```
 
@@ -129,7 +130,7 @@ A **plugin** is a directory with a manifest. Two kinds in v1: `agent` and
 name: developer
 version: 0.1.0
 kind: agent
-model: claude-opus-4-7        # overridable per task
+model: claude-opus-4-7        # advisory — subscription plan has final say (§4.7)
 prompt: ./system.md           # role-specific system prompt
 skills:                       # whitelist of skill names this agent may invoke
   - codebase-search
@@ -187,21 +188,62 @@ Five sub-systems, kept deliberately small:
    Hybrid: structured records (decisions, conventions, glossary) + vector
    index over freeform notes. Scoped by `project_id`.
 
-### 4.4 Claude Code as substrate
+### 4.4 Claude Code CLI as substrate
 
-Each agent maps to a Claude Code session created via the Claude Agent
-SDK. The runtime:
+Each agent invocation is a **spawned `claude` CLI subprocess** running
+in headless mode (`-p` / `--print` with `--output-format stream-json`).
+We do **not** use the Anthropic API or the Agent SDK directly. This
+choice is deliberate (see §4.7 for the trade-offs):
 
-- Builds the **system prompt** from the agent's `prompt` file + injected
-  context (relevant memory, task description, hand-off payload).
-- Sets the **tool allowlist** from the agent manifest.
-- Runs the session **headless** (non-interactive), streaming events back
-  to the orchestrator.
-- Captures the final structured output and the transcript for the run
-  journal.
+- **Billing.** The host machine is logged in to Claude Code with a
+  Pro/Max subscription (`claude login` run once); spawned subprocesses
+  inherit that auth via Claude Code's local credential store. All model
+  usage is metered against the subscription quota — **no API key, no
+  per-token billing**.
+- **Tool runtime.** Claude Code already implements Read/Edit/Write/Bash
+  /Grep/Glob/WebFetch/WebSearch, the permission system, and MCP tool
+  hosting. We re-use all of it instead of re-implementing.
 
-This means Hira does not own the model loop — Claude Code does. Hira owns
-*coordination*.
+For each hand-off the **Session driver** (`@hira/session`):
+
+1. Materialises the agent's effective system prompt: `system.md`
+   contents + injected context (task description, hand-off envelope,
+   relevant memory excerpts). Written to a tempfile for `--system-prompt`.
+2. Writes a per-session settings file with the manifest's tool allowlist
+   pre-approved (`.hira/runs/<run_id>/<agent>/settings.json`), so
+   headless runs do not block on permission prompts.
+3. Generates the per-agent MCP config (see §4.6) listing the Hira
+   skills this agent may call.
+4. Spawns `claude` with the flags assembled (see *Invocation contract*
+   below), captures `--output-format stream-json` events on stdout.
+5. Persists the full event stream to the run journal and extracts the
+   structured response (a fenced JSON block in the final assistant
+   message, validated against the agent's `outputs.schema`).
+
+**Invocation contract** (one hand-off → one subprocess):
+
+```
+claude -p "<envelope serialised as a message>" \
+  --system-prompt "<rendered system prompt>" \
+  --allowedTools  "<from manifest.tools, comma-joined>" \
+  --disallowedTools "<global denylist>" \
+  --permission-mode acceptEdits \
+  --max-turns <budgets.max_turns> \
+  --output-format stream-json \
+  --verbose \
+  --mcp-config .hira/runs/<run_id>/<agent>/mcp.json \
+  --cwd <project root or scoped path>
+```
+
+For warm hand-offs (§4.5) the first call captures the `session_id` from
+the initial `system` event; subsequent calls pass `--resume <id>`
+instead of `--system-prompt` (Claude Code already has the prompt
+loaded).
+
+**Hira owns coordination; Claude Code owns the model loop and the
+tools.** The session driver is the only place in Hira that knows the
+substrate is a CLI subprocess — every other component sees agents as
+pure `(envelope in) → (envelope out)` functions.
 
 ### 4.5 Session lifecycle: fresh per hand-off (default), warm opt-in
 
@@ -220,16 +262,67 @@ and dies when the hand-off completes.
 | **Cost** | Re-sends system prompt each call. | Saves the re-send. |
 | **Continuity** | Memory store is the only continuity mechanism. | Agent has working memory across the Run for free. |
 
-We pay for the chosen default with **prompt caching** on the system
-prompt + stable injected context (Anthropic SDK prompt caching makes the
-re-send near-free after the first hit). This mostly closes the cost and
-latency gap.
+**How the modes map to the CLI driver:**
 
-**Per-agent opt-in for warm sessions within a Run** is allowed via the
+- **Fresh** = a new `claude -p ...` subprocess per hand-off, with
+  `--system-prompt` rendered from scratch. The cost we pay is repeated
+  prompt processing; Claude Code's own prompt caching reclaims most of
+  it on cache-eligible content.
+- **Warm** = the first hand-off captures the `session_id` emitted in
+  the CLI's `system` init event; subsequent hand-offs within the same
+  Run skip `--system-prompt` and pass `--resume <session_id>` to
+  Claude Code, which restores the conversation in-place.
+
+**Per-agent opt-in for warm sessions within a Run** is set in the
 manifest (`session.mode: warm | fresh`, default `fresh`). The natural
 candidates are agents that iterate with a partner — typically Developer
 ↔ Reviewer cycles — where continuity is worth the trade-off. Warm
-sessions never survive past Run boundaries.
+sessions never survive past Run boundaries; the run finaliser deletes
+the captured session IDs.
+
+### 4.6 Skill plugins exposed via MCP
+
+Hira skills that the model itself must be able to invoke (e.g.
+`memory.query`, `handoff.escalate`, `journal.note`) are exposed to the
+agent as **MCP tools**. The Session driver generates a per-agent MCP
+config (`.hira/runs/<run_id>/<agent>/mcp.json`) listing only the
+skills permitted by that agent's manifest, then passes it via
+`--mcp-config`.
+
+Hira ships one built-in MCP server (`@hira/mcp-skills`) that hosts the
+core skills. Third-party skills can be added by dropping a manifest in
+`plugins/skills/<name>/skill.yaml` pointing at any MCP-compatible
+binary; Hira does not care what language it's written in.
+
+Skills that do **not** need to be model-callable (e.g. "run the test
+suite" invoked by Hira *after* an agent's hand-off) stay outside MCP
+and are executed directly by the runtime.
+
+### 4.7 Quotas, parallelism, and degraded modes
+
+CLI-subprocess substrate is cheaper but **rate-limited by the
+subscription plan**, not metered by tokens. Implications the runtime
+must respect:
+
+- **Single Anthropic identity per host.** Claude Code's auth lives in
+  one credential store on disk; we cannot fan out across multiple
+  accounts to multiply throughput.
+- **Subscription rate windows (5-hour, weekly).** The orchestrator
+  must surface CLI rate-limit errors as first-class events, back off,
+  and (for long Runs) check remaining budget before fanning out.
+- **Parallel hand-offs share the same quota.** Spawning N Reviewers in
+  parallel is fine technically (each is its own subprocess), but each
+  burns the same pool — fan-out is a cost dial, not free.
+- **Degraded mode.** When the rate window is exhausted, the runtime
+  pauses non-essential agents (Memory Maintainer, parallel Reviewer
+  fan-out) before pausing the critical path. The user can opt back into
+  API-key mode per Run with `hira run --api-key` if they have an
+  `ANTHROPIC_API_KEY` and want to bypass quota at metered cost — kept
+  as an explicit opt-in, not the default.
+- **Model selection.** Claude Code picks the model per its subscription
+  rules; `manifest.model` becomes an *advisory* hint passed via
+  `--model` and silently ignored if the plan does not allow it. We
+  no longer assume free per-agent model choice.
 
 ---
 
@@ -336,6 +429,15 @@ Rules:
 - Hand-offs are persisted to the run journal — every Run is fully
   replayable.
 
+**Wire format on the CLI boundary.** The envelope is serialised to
+JSON and passed as the prompt (`claude -p '<json>'`) wrapped in a
+short framing message ("You are handling hand-off X from Y. Envelope
+follows."). The agent's reply must end with a fenced ```json``` block
+matching its `outputs.schema`; the session driver extracts and
+validates it before lifting it back into a `Handoff` object. Anything
+the agent writes outside that block is treated as freeform reasoning
+and stored in the journal but ignored by the bus.
+
 ---
 
 ## 7. Worked Example: "Add a rate limiter to the login endpoint"
@@ -398,31 +500,43 @@ hira plugins reload
 
 ```yaml
 project: my-app
-default_model: claude-opus-4-7
+claude:
+  binary: claude              # path to the Claude Code CLI
+  permission_mode: acceptEdits
+  output_format: stream-json
+  # default_model is advisory; subscription plan has the final say (§4.7)
+  default_model: claude-opus-4-7
 agents:
-  developer:
-    model: claude-opus-4-7
   knowledge:
-    model: claude-haiku-4-5-20251001
+    model: claude-haiku-4-5-20251001   # advisory
 budgets:
   per_run:
     max_handoffs: 30
     max_wall_clock_s: 600
+rate_limits:
+  on_exhaustion: pause-noncritical    # | fail-fast | switch-to-api-key
 memory:
-  backend: sqlite+chroma
+  backend: sqlite+vector
   path: .hira/memory
+runs:
+  journal_path: .hira/runs
 ```
 
 ---
 
 ## 10. Tech Stack
 
-- **Language:** **TypeScript** (decided). Matches the Claude Agent SDK
-  and Claude Code itself, gives the best session-driver integration, and
-  keeps plugin manifests / runtime contracts in one type system. Plugins
-  are language-agnostic — skills can shell out to anything.
-- **Session driver:** Claude Agent SDK (headless Claude Code sessions),
-  with prompt caching on system prompt + stable injected context.
+- **Language:** **TypeScript** (decided). Matches the Claude Code
+  ecosystem, keeps plugin manifests / runtime contracts in one type
+  system. Plugins (skills) are language-agnostic — they shell out or
+  expose MCP servers.
+- **Session driver:** spawned **Claude Code CLI** subprocesses
+  (`claude -p --output-format stream-json --verbose`), authed via the
+  host's Pro/Max login (§4.4). Communicate via stdin/stdout JSON-line
+  streams; managed by `@hira/session` using `node:child_process`.
+- **Skill runtime:** model-callable skills are exposed as **MCP
+  servers**; built-ins ship in `@hira/mcp-skills`. Non-model skills
+  are plain processes the runtime invokes between hand-offs.
 - **State:** SQLite via `better-sqlite3` for task graph + run journal.
 - **Memory:** SQLite for structured records + a local vector index
   (`sqlite-vec` first; Chroma if we need more) for freeform notes.
@@ -430,7 +544,13 @@ memory:
 - **Schemas:** JSON Schema for plugin input/output contracts, Zod at the
   TypeScript boundary, schemas compiled to both at build time.
 - **Runtime layout:** monorepo with pnpm workspaces — `@hira/runtime`,
-  `@hira/cli`, `@hira/plugin-loader`, `@hira/memory`.
+  `@hira/cli`, `@hira/plugin-loader`, `@hira/session`, `@hira/memory`,
+  `@hira/mcp-skills`.
+
+### Prerequisites on the host
+- Claude Code CLI installed and on `PATH` (`claude --version` must work).
+- `claude login` completed once with a Pro or Max subscription.
+- Node 20+ (already required for the runtime).
 
 ---
 
@@ -438,12 +558,13 @@ memory:
 
 | Milestone | Scope |
 | --------- | ----- |
-| **M0 — Skeleton**     | Repo layout, plugin loader, agent manifests for all eight roles (empty prompts), one trivial run end-to-end through the orchestrator. |
-| **M1 — Single track** | Orchestrator → Planner → Developer → Tester → Reviewer working on a real task. No memory yet. CLI surface only. |
+| **M0.1 — Skeleton** ✅ | pnpm/TS workspace, plugin loader (zod-validated), eight agent manifests with placeholder prompts, `hira agents list`. *(Landed in `1b9c4a2`.)* |
+| **M0.2 — Session driver** | `@hira/session` spawns a single `claude -p` subprocess (Orchestrator role), captures stream-json events, parses the fenced JSON reply. `hira run "<msg>"` works end-to-end against the Pro subscription. `--dry-run` prints the assembled invocation without spawning. |
+| **M1 — Single track** | Orchestrator → Planner → Developer → Tester → Reviewer working on a real task, with the typed Handoff envelope and the SQLite run journal. No memory yet. |
 | **M2 — Memory**       | Memory Maintainer wired up; ADRs and glossary written and queryable; Knowledge agent reads from memory. |
-| **M3 — Robust hand-offs** | Typed envelopes validated, run journal replayable, budgets enforced, failure modes handled (agent timeout, schema mismatch). |
+| **M3 — Robust hand-offs** | Schema validation enforced both ways, journal replay command, budgets + rate-limit handling (§4.7), failure modes (timeout, malformed JSON reply, missing `claude` binary). |
 | **M4 — Surfaces**     | HTTP API, web UI shell, GitHub PR comment surface. |
-| **M5 — Polish**       | Cost dashboards, per-agent model tuning, parallel review fan-out, plugin marketplace format. |
+| **M5 — Polish**       | Quota dashboards, parallel review fan-out with quota-aware throttling, MCP-based plugin marketplace format. |
 
 ---
 
@@ -456,12 +577,25 @@ memory:
 3. **Conflict resolution: Solution Architect arbitrates after two
    Reviewer rejections, then the verdict goes to the user for approval**
    (§5.6).
+4. **Substrate: spawned Claude Code CLI subprocesses** (not the
+   Anthropic SDK), authed via Pro/Max subscription, billed against the
+   subscription quota (§4.4, §4.7).
+5. **Permission model: pre-approve the manifest's tool allowlist** in a
+   per-session settings file at run-start; headless invocations never
+   prompt. The global denylist (e.g. destructive Bash) is enforced by
+   the runtime, not the agent.
+6. **Skills are MCP servers** when the model must invoke them;
+   between-hand-off skills (e.g. test suite) stay outside MCP (§4.6).
 
 ### Still open
-4. **Memory granularity** — what gets remembered automatically vs what
+7. **Memory granularity** — what gets remembered automatically vs what
    requires an explicit "remember this" from the user?
-5. **Tool/permission model** — re-use Claude Code's permission prompts,
-   or pre-approve based on the agent manifest's allowlist?
+8. **`--resume` durability** — does Claude Code guarantee a captured
+   `session_id` is resumable later in the same Run, or do we need to
+   pin a CLI version? Verify against the installed CLI in M0.2.
+9. **Concurrency vs quota** — should fan-out (parallel Reviewers) be
+   gated by a runtime semaphore, or do we let it rip and react to
+   rate-limit errors? Decide once we observe real quota behaviour.
 
 ---
 
