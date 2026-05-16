@@ -1,6 +1,13 @@
 import { Command } from 'commander';
-import { resolve } from 'node:path';
-import { loadPlugins } from '@hira/runtime';
+import { resolve, join } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import {
+  loadPlugins,
+  SessionDriver,
+  prepareAgentIsolation,
+  type LoadedAgent,
+  type SessionInvocation,
+} from '@hira/runtime';
 
 const program = new Command();
 program.name('hira').description('Hira multi-agent orchestrator').version('0.0.1');
@@ -28,6 +35,68 @@ agents
       );
     }
   });
+
+program
+  .command('run')
+  .description('Run the Orchestrator on a single user message (M0.2: no hand-offs yet)')
+  .argument('<message>', 'the user message to send to the Orchestrator')
+  .option('--root <path>', 'project root', process.cwd())
+  .option('--dry-run', 'print the assembled claude invocation without spawning')
+  .option('--binary <path>', 'path to the claude CLI binary', 'claude')
+  .action(
+    async (
+      message: string,
+      opts: { root: string; dryRun?: boolean; binary: string },
+    ) => {
+      const root = resolve(opts.root);
+      const { agents } = await loadPlugins(root);
+      const orchestrator = agents.find(
+        (a: LoadedAgent) => a.manifest.name === 'orchestrator',
+      );
+      if (!orchestrator) {
+        console.error('No agent named "orchestrator" found under plugins/agents/.');
+        process.exit(1);
+      }
+
+      const runId = randomUUID();
+      const runDir = join(root, '.hira', 'runs', runId);
+      const isolation = await prepareAgentIsolation({
+        runDir,
+        agentName: orchestrator.manifest.name,
+        allowedTools: orchestrator.manifest.tools,
+      });
+
+      const invocation: SessionInvocation = {
+        binary: opts.binary,
+        prompt: message,
+        systemPrompt: orchestrator.systemPrompt,
+        allowedTools: orchestrator.manifest.tools,
+        permissionMode: 'acceptEdits',
+        cwd: root,
+        sessionId: randomUUID(),
+        noSessionPersistence: true,
+        outputFormat: 'stream-json',
+        settingSources: [], // ignore host ~/.claude and project .claude
+        settingsPath: isolation.settingsPath,
+      };
+
+      const driver = new SessionDriver();
+
+      if (opts.dryRun) {
+        const dry = driver.dryRun(invocation);
+        console.log(dry.display);
+        return;
+      }
+
+      const result = await driver.run(invocation);
+      if (result.exitCode !== 0) {
+        console.error(`claude exited with code ${result.exitCode}`);
+        if (result.stderr) console.error(result.stderr.trimEnd());
+        process.exit(result.exitCode || 1);
+      }
+      process.stdout.write(result.text.trimEnd() + '\n');
+    },
+  );
 
 await program.parseAsync(process.argv).catch((err: unknown) => {
   console.error(err instanceof Error ? err.message : String(err));

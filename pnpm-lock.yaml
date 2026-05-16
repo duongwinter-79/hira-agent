@@ -58,6 +58,15 @@ importers:
       '@hira/plugin-loader':
         specifier: workspace:*
         version: link:../plugin-loader
+      '@hira/session':
+        specifier: workspace:*
+        version: link:../session
+
+  packages/session:
+    dependencies:
+      '@hira/plugin-loader':
+        specifier: workspace:*
+        version: link:../plugin-loader
 
 packages:
 
