@@ -203,6 +203,34 @@ SDK. The runtime:
 This means Hira does not own the model loop — Claude Code does. Hira owns
 *coordination*.
 
+### 4.5 Session lifecycle: fresh per hand-off (default), warm opt-in
+
+**Default: fresh Claude Code session for every hand-off.** Each session
+starts from `(system prompt + injected context + hand-off envelope)`
+and dies when the hand-off completes.
+
+| | Fresh per hand-off (chosen default) | Warm per agent within a Run |
+| --- | --- | --- |
+| **Replayability** | Pure: same inputs → same behavior. Trivial to replay a Run from the journal. | Output depends on hidden session history — harder to reproduce. |
+| **Context hygiene** | No pollution; budget is bounded per hand-off. | Earlier turns drag along whether relevant or not; long Runs blow the window. |
+| **Hand-off contract** | Everything the agent knows arrived in the typed envelope or memory — contracts stay honest. | Agents "know" things outside the envelope; contracts leak. |
+| **Parallel fan-off** | Trivial — spawn N Reviewers in parallel. | One session, one consumer. |
+| **Audit trail** | Each transcript is self-contained. | Transcripts braid across hand-offs. |
+| **Latency** | Cold start each time. | Warm; no re-read. |
+| **Cost** | Re-sends system prompt each call. | Saves the re-send. |
+| **Continuity** | Memory store is the only continuity mechanism. | Agent has working memory across the Run for free. |
+
+We pay for the chosen default with **prompt caching** on the system
+prompt + stable injected context (Anthropic SDK prompt caching makes the
+re-send near-free after the first hit). This mostly closes the cost and
+latency gap.
+
+**Per-agent opt-in for warm sessions within a Run** is allowed via the
+manifest (`session.mode: warm | fresh`, default `fresh`). The natural
+candidates are agents that iterate with a partner — typically Developer
+↔ Reviewer cycles — where continuity is worth the trade-off. Warm
+sessions never survive past Run boundaries.
+
 ---
 
 ## 5. Agent Catalog (v1)
@@ -258,6 +286,14 @@ Full system prompts live in `plugins/agents/<name>/system.md`.
 - **Outputs:** review comments (severity-tagged), overall verdict
   (`approve` / `request-changes`).
 - **Read-only** tool set; cannot edit files.
+- **Conflict resolution:** if the Reviewer rejects Developer's patch
+  **twice on the same task**, the dispute is escalated to the **Solution
+  Architect**, who reviews the ADR, Developer's patches, and Reviewer's
+  comments and produces an arbitration verdict (`adjust-adr`,
+  `side-with-reviewer`, `side-with-developer`, or `re-scope`). The
+  Architect's verdict is **not auto-applied** — the Orchestrator
+  surfaces it to the user for approval before any further action. The
+  user's call is then recorded to memory as a precedent.
 
 ### 5.7 Knowledge ("knowledge guy")
 - **Role:** Answer factual questions about the codebase, the docs, the
@@ -379,20 +415,22 @@ memory:
 
 ---
 
-## 10. Tech Stack (proposed)
+## 10. Tech Stack
 
-- **Language:** TypeScript for the runtime (matches Claude Agent SDK,
-  best Claude Code integration). Plugins are language-agnostic — skills
-  can shell out to anything.
-- **Session driver:** Claude Agent SDK (headless Claude Code sessions).
-- **State:** SQLite (via `better-sqlite3`) for task graph + run journal.
+- **Language:** **TypeScript** (decided). Matches the Claude Agent SDK
+  and Claude Code itself, gives the best session-driver integration, and
+  keeps plugin manifests / runtime contracts in one type system. Plugins
+  are language-agnostic — skills can shell out to anything.
+- **Session driver:** Claude Agent SDK (headless Claude Code sessions),
+  with prompt caching on system prompt + stable injected context.
+- **State:** SQLite via `better-sqlite3` for task graph + run journal.
 - **Memory:** SQLite for structured records + a local vector index
-  (e.g. `sqlite-vec` or Chroma) for freeform notes.
+  (`sqlite-vec` first; Chroma if we need more) for freeform notes.
 - **Transport:** Local CLI first; HTTP server behind a flag.
-- **Schemas:** JSON Schema for plugin input/output contracts; Zod at the
-  TypeScript boundary.
-
-Open question: pick TS vs Python before milestone M1.
+- **Schemas:** JSON Schema for plugin input/output contracts, Zod at the
+  TypeScript boundary, schemas compiled to both at build time.
+- **Runtime layout:** monorepo with pnpm workspaces — `@hira/runtime`,
+  `@hira/cli`, `@hira/plugin-loader`, `@hira/memory`.
 
 ---
 
@@ -409,20 +447,21 @@ Open question: pick TS vs Python before milestone M1.
 
 ---
 
-## 12. Open Questions
+## 12. Decisions & Open Questions
 
-1. **Runtime language** — TS or Python? TS is closer to the Agent SDK
-   and Claude Code; Python is closer to most ML/data tooling.
-2. **Session reuse vs fresh spawn** — do we keep an agent's Claude Code
-   session warm across hand-offs in the same Run, or spawn fresh each
-   time? Trade-off: context continuity vs context pollution.
-3. **Memory granularity** — what gets remembered automatically vs what
+### Decided
+1. **Runtime language: TypeScript** (§10).
+2. **Session lifecycle: fresh per hand-off by default**, warm-within-Run
+   opt-in per agent manifest (§4.5).
+3. **Conflict resolution: Solution Architect arbitrates after two
+   Reviewer rejections, then the verdict goes to the user for approval**
+   (§5.6).
+
+### Still open
+4. **Memory granularity** — what gets remembered automatically vs what
    requires an explicit "remember this" from the user?
-4. **Conflict resolution** — when Reviewer rejects Developer's patch
-   twice, who arbitrates? Orchestrator escalates to user, or Solution
-   Architect adjudicates?
-5. **Tool/permission model** — do we re-use Claude Code's permission
-   prompts, or pre-approve based on the agent manifest's allowlist?
+5. **Tool/permission model** — re-use Claude Code's permission prompts,
+   or pre-approve based on the agent manifest's allowlist?
 
 ---
 
