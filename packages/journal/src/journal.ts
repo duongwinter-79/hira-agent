@@ -1,0 +1,239 @@
+import { mkdir, readFile, readdir, stat, appendFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import type {
+  Handoff,
+  HandoffRecord,
+  HandoffStatus,
+  RunRecord,
+  RunStatus,
+  Artifact,
+} from './types.js';
+
+type JournalEvent =
+  | ({ t: 'run_started' } & RunRecord)
+  | ({ t: 'handoff_started'; run_id: string } & HandoffRecord)
+  | {
+      t: 'handoff_completed';
+      run_id: string;
+      handoff_id: string;
+      status: HandoffStatus;
+      ended_at: string;
+      session_id?: string;
+      response?: unknown;
+      response_text?: string;
+      exit_code?: number;
+      stderr_excerpt?: string;
+    }
+  | { t: 'artifact_recorded'; run_id: string } & Artifact
+  | { t: 'run_closed'; run_id: string; ended_at: string; status: RunStatus };
+
+/**
+ * Append-only JSONL journal at `.hira/runs/<run_id>/journal.jsonl`.
+ *
+ * One Journal instance scopes to one project root. Each Run gets its own
+ * directory + jsonl file. Reads scan/replay events to reconstruct state.
+ *
+ * JSONL is good enough for M1.1 (single-writer, small per-run files). When
+ * §4.9 `hira runs trace` queries need cross-run indexes (M1.5+), swap the
+ * backend to SQLite without changing the public API.
+ */
+export class Journal {
+  private readonly runsRoot: string;
+  /** Per-run, per-artifact-kind monotonic sequence counters. */
+  private readonly seqCounters = new Map<string, number>();
+
+  constructor(projectRoot: string) {
+    this.runsRoot = join(projectRoot, '.hira', 'runs');
+  }
+
+  async openRun(intent: string): Promise<RunRecord> {
+    const id = randomUUID();
+    const dir = join(this.runsRoot, id);
+    await mkdir(dir, { recursive: true });
+    const run: RunRecord = {
+      id,
+      intent_message: intent,
+      started_at: new Date().toISOString(),
+      status: 'running',
+    };
+    await this.append(id, { t: 'run_started', ...run });
+    return run;
+  }
+
+  async recordHandoffStart(handoff: Handoff): Promise<HandoffRecord> {
+    const record: HandoffRecord = {
+      ...handoff,
+      status: 'in_progress',
+      started_at: new Date().toISOString(),
+    };
+    await this.append(handoff.run_id, { t: 'handoff_started', ...record });
+    return record;
+  }
+
+  async completeHandoff(
+    runId: string,
+    handoffId: string,
+    update: {
+      status: HandoffStatus;
+      session_id?: string;
+      response?: unknown;
+      response_text?: string;
+      exit_code?: number;
+      stderr_excerpt?: string;
+    },
+  ): Promise<void> {
+    await this.append(runId, {
+      t: 'handoff_completed',
+      run_id: runId,
+      handoff_id: handoffId,
+      ended_at: new Date().toISOString(),
+      ...update,
+    });
+  }
+
+  async recordArtifact(
+    runId: string,
+    kind: string,
+    payload: unknown,
+    handoffId?: string,
+  ): Promise<Artifact> {
+    const key = `${runId}::${kind}`;
+    const seq = (this.seqCounters.get(key) ?? 0) + 1;
+    this.seqCounters.set(key, seq);
+    const artifact: Artifact = {
+      id: `${kind}:${runId.slice(0, 8)}:${seq}`,
+      kind,
+      payload,
+      created_at: new Date().toISOString(),
+      handoff_id: handoffId,
+    };
+    await this.append(runId, { t: 'artifact_recorded', run_id: runId, ...artifact });
+    return artifact;
+  }
+
+  async closeRun(runId: string, status: Exclude<RunStatus, 'running'>): Promise<void> {
+    await this.append(runId, {
+      t: 'run_closed',
+      run_id: runId,
+      ended_at: new Date().toISOString(),
+      status,
+    });
+  }
+
+  async listRuns(limit = 50): Promise<RunRecord[]> {
+    const entries = await safeReaddir(this.runsRoot);
+    const runs: RunRecord[] = [];
+    for (const entry of entries) {
+      const runDir = join(this.runsRoot, entry);
+      if (!(await isDir(runDir))) continue;
+      const events = await this.readEvents(entry).catch(() => []);
+      const run = projectRun(events);
+      if (run) runs.push(run);
+    }
+    runs.sort((a, b) => b.started_at.localeCompare(a.started_at));
+    return runs.slice(0, limit);
+  }
+
+  async getRun(
+    runId: string,
+  ): Promise<{ run: RunRecord; handoffs: HandoffRecord[]; artifacts: Artifact[] } | undefined> {
+    const events = await this.readEvents(runId).catch(() => null);
+    if (!events) return undefined;
+    const run = projectRun(events);
+    if (!run) return undefined;
+    const { handoffs, artifacts } = projectHandoffsAndArtifacts(events);
+    return { run, handoffs, artifacts };
+  }
+
+  /**
+   * Path to the run directory; callers (e.g. the CLI) drop per-agent
+   * isolation settings here too.
+   */
+  runDir(runId: string): string {
+    return join(this.runsRoot, runId);
+  }
+
+  private async append(runId: string, event: JournalEvent): Promise<void> {
+    const path = join(this.runsRoot, runId, 'journal.jsonl');
+    await appendFile(path, JSON.stringify(event) + '\n', 'utf8');
+  }
+
+  private async readEvents(runId: string): Promise<JournalEvent[]> {
+    const path = join(this.runsRoot, runId, 'journal.jsonl');
+    const raw = await readFile(path, 'utf8');
+    const out: JournalEvent[] = [];
+    for (const line of raw.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      out.push(JSON.parse(trimmed) as JournalEvent);
+    }
+    return out;
+  }
+}
+
+function projectRun(events: JournalEvent[]): RunRecord | undefined {
+  let run: RunRecord | undefined;
+  for (const e of events) {
+    if (e.t === 'run_started') {
+      run = {
+        id: e.id,
+        intent_message: e.intent_message,
+        started_at: e.started_at,
+        status: e.status,
+      };
+    } else if (e.t === 'run_closed' && run) {
+      run = { ...run, ended_at: e.ended_at, status: e.status };
+    }
+  }
+  return run;
+}
+
+function projectHandoffsAndArtifacts(events: JournalEvent[]): {
+  handoffs: HandoffRecord[];
+  artifacts: Artifact[];
+} {
+  const handoffs = new Map<string, HandoffRecord>();
+  const artifacts: Artifact[] = [];
+  for (const e of events) {
+    if (e.t === 'handoff_started') {
+      const { t: _t, ...rest } = e;
+      handoffs.set(e.handoff_id, rest as HandoffRecord);
+    } else if (e.t === 'handoff_completed') {
+      const existing = handoffs.get(e.handoff_id);
+      if (existing) {
+        handoffs.set(e.handoff_id, {
+          ...existing,
+          status: e.status,
+          ended_at: e.ended_at,
+          session_id: e.session_id ?? existing.session_id,
+          response: e.response ?? existing.response,
+          response_text: e.response_text ?? existing.response_text,
+          exit_code: e.exit_code ?? existing.exit_code,
+          stderr_excerpt: e.stderr_excerpt ?? existing.stderr_excerpt,
+        });
+      }
+    } else if (e.t === 'artifact_recorded') {
+      const { t: _t, run_id: _r, ...rest } = e;
+      artifacts.push(rest as Artifact);
+    }
+  }
+  return { handoffs: [...handoffs.values()], artifacts };
+}
+
+async function safeReaddir(dir: string): Promise<string[]> {
+  try {
+    return await readdir(dir);
+  } catch {
+    return [];
+  }
+}
+
+async function isDir(p: string): Promise<boolean> {
+  try {
+    return (await stat(p)).isDirectory();
+  } catch {
+    return false;
+  }
+}
+

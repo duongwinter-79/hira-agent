@@ -109,10 +109,11 @@ hira-agent/
 │       └── ...
 ├── packages/                    # pnpm workspace
 │   ├── plugin-loader/           # @hira/plugin-loader  (zod-validated manifests)
-│   ├── session/                 # @hira/session        (claude CLI subprocess driver)
-│   ├── mcp-skills/              # @hira/mcp-skills     (built-in MCP server: memory, handoff, journal)
+│   ├── session/                 # @hira/session        (claude CLI subprocess driver, behavioural skills)
+│   ├── journal/                 # @hira/journal        (run + handoff + artifact journal, JSONL → SQLite in M1.5)
+│   ├── mcp-skills/              # @hira/mcp-skills     (built-in MCP server: memory, handoff, spec-consistency)
 │   ├── memory/                  # @hira/memory         (SQLite + vector store)
-│   ├── runtime/                 # @hira/runtime        (orchestrator, bus, state, run journal)
+│   ├── runtime/                 # @hira/runtime        (orchestrator, bus, surface re-exports)
 │   └── cli/                     # @hira/cli            (`hira` user-facing CLI)
 ├── .hira/                       # runtime artefacts (gitignored)
 │   ├── runs/<run_id>/           # per-run journals, per-agent settings + mcp configs
@@ -617,7 +618,9 @@ runs:
 | **M0.1 — Skeleton** ✅ | pnpm/TS workspace, plugin loader (zod-validated), eight agent manifests with placeholder prompts, `hira agents list`. *(Landed in `1b9c4a2`.)* |
 | **M0.2 — Session driver** ✅ | `@hira/session` spawns a single `claude -p` subprocess (Orchestrator role), captures stream-json events, returns the assistant reply. `hira run "<msg>"` works end-to-end against the Pro subscription. `--dry-run` prints the assembled invocation. *(Landed in `367fd06`.)* |
 | **M0.3 — Agent isolation** ✅ | Per-agent isolation directory at `.hira/runs/<run_id>/<agent>/`, generated `settings.json` with empty `hooks` + tool allowlist as `permissions.allow`, `--setting-sources ""` to suppress host `~/.claude` and project `.claude/` inheritance. Verified the stop-hook contamination from §12-#16 is gone on the dev sandbox; added an opt-in e2e test (`HIRA_E2E=1`). |
-| **M1 — Single track** | Orchestrator → Planner → Developer → Tester → Reviewer working on a real task, with the typed Handoff envelope and the SQLite run journal. No memory yet. |
+| **M1.1 — Foundations** ✅ | `@hira/journal` (JSONL backend, stable artifact IDs `kind:run_id_short:seq` per §4.9), typed `Handoff` zod schema with forward-compat `verification_report` + `delta_refs` fields, behavioural-skill resolver in `@hira/session` (loads SKILL.md, strips frontmatter, prepends to system prompt), journal-aware `hira run` writing one (user → orchestrator) hand-off per Run, `hira runs list`, `hira runs show <run_id>`. Karpathy guidelines verified inlined into Developer's effective prompt. |
+| **M1.2 — First hand-off** | Add Planner system prompt; build the bus's `dispatchHandoff()` (orchestrator → planner round-trip); orchestrator's system prompt updated to emit a fenced JSON dispatch envelope; verification-seam no-op insertion between Developer→Reviewer reserved for M1.5. |
+| **M1.3 — Full single track** | Developer / Tester / Reviewer wired with proper system prompts. Full Orchestrator → Planner → Developer → Tester → Reviewer flow on a real task. No memory yet. |
 | **M1.5 — Spec lifecycle & verification gates** | Spec/ADR delta state machine (§4.8); `spec-consistency` MCP skill for the Cross-Artifact Consistency pass; deterministic Verification Engine harness (test runner + type/lint, optional Semgrep/Schemathesis) gating the Developer→Reviewer hand-off; bidirectional traceability view (`hira runs trace`, §4.9). |
 | **M2 — Memory**       | Memory Maintainer wired up; ADRs and glossary written and queryable; Knowledge agent reads from memory. |
 | **M3 — Robust hand-offs** | Schema validation enforced both ways, journal replay command, budgets + rate-limit handling (§4.7), failure modes (timeout, malformed JSON reply, missing `claude` binary). |

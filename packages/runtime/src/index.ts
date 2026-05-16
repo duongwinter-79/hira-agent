@@ -19,6 +19,8 @@ export {
   isSystemInit,
   extractAssistantText,
   prepareAgentIsolation,
+  loadBehaviouralSkills,
+  composeSystemPrompt,
 } from '@hira/session';
 export type {
   SessionInvocation,
@@ -31,4 +33,23 @@ export type {
   ResultEvent,
   IsolationRequest,
   IsolationArtifacts,
+  RenderedBehaviouralSkill,
 } from '@hira/session';
+
+export {
+  Journal,
+  HandoffSchema,
+  HandoffKindSchema,
+  ArtifactSchema,
+  VerificationReportSchema,
+} from '@hira/journal';
+export type {
+  Handoff,
+  HandoffKind,
+  HandoffStatus,
+  HandoffRecord,
+  RunRecord,
+  RunStatus,
+  Artifact,
+  VerificationReport,
+} from '@hira/journal';

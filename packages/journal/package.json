@@ -1,5 +1,5 @@
 {
-  "name": "@hira/runtime",
+  "name": "@hira/journal",
   "version": "0.0.1",
   "private": true,
   "type": "module",
@@ -14,12 +14,9 @@
   "files": ["dist"],
   "scripts": {
     "build": "tsup",
-    "test": "vitest run --passWithNoTests"
+    "test": "vitest run"
   },
   "dependencies": {
-    "@hira/journal": "workspace:*",
-    "@hira/memory": "workspace:*",
-    "@hira/plugin-loader": "workspace:*",
-    "@hira/session": "workspace:*"
+    "zod": "^3.23.8"
   }
 }
