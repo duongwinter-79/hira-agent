@@ -1,0 +1,12 @@
+name: tester
+version: 0.0.1
+kind: agent
+prompt: ./system.md
+tools:
+  - Read
+  - Edit
+  - Write
+  - Bash
+escalates_to:
+  - reviewer
+  - developer

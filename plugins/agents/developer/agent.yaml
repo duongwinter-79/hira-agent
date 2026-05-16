@@ -1,0 +1,16 @@
+name: developer
+version: 0.0.1
+kind: agent
+prompt: ./system.md
+tools:
+  - Read
+  - Edit
+  - Write
+  - Bash
+escalates_to:
+  - reviewer
+  - tester
+  - solution-architect
+  - knowledge
+session:
+  mode: warm

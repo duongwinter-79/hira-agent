@@ -1,0 +1,9 @@
+name: orchestrator
+version: 0.0.1
+kind: agent
+prompt: ./system.md
+tools: []
+escalates_to:
+  - planner
+  - knowledge
+  - memory

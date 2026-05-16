@@ -1,0 +1,11 @@
+name: planner
+version: 0.0.1
+kind: agent
+prompt: ./system.md
+tools:
+  - Read
+  - Grep
+  - Glob
+escalates_to:
+  - solution-architect
+  - knowledge

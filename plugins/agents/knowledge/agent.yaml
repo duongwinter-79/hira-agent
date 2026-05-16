@@ -1,0 +1,11 @@
+name: knowledge
+version: 0.0.1
+kind: agent
+prompt: ./system.md
+tools:
+  - Read
+  - Grep
+  - Glob
+  - WebFetch
+  - WebSearch
+escalates_to: []

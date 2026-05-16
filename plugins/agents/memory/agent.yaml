@@ -1,0 +1,7 @@
+name: memory
+version: 0.0.1
+kind: agent
+prompt: ./system.md
+tools:
+  - Read
+escalates_to: []
