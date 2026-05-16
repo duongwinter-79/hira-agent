@@ -324,6 +324,56 @@ must respect:
   `--model` and silently ignored if the plan does not allow it. We
   no longer assume free per-agent model choice.
 
+### 4.8 Spec lifecycle: deltas, consistency, and verification gates
+
+The runtime treats the spec/ADR store as a **first-class state machine**
+rather than an artifact written as a side effect of a Run. Three pieces:
+
+**Delta state machine.** Specs and ADRs live in two states: `baseline`
+(verified, merged) and `delta` (proposed by a Run, not yet integrated).
+A Run produces deltas in `.hira/runs/<run_id>/deltas/`; they fold into
+the baseline only after the verification gates below pass and the user
+approves the Run. Failed Runs leave the baseline untouched. The Memory
+Maintainer's writes (§5.8) operate on the baseline, never on deltas.
+
+**Cross-Artifact Consistency pass.** Before the Orchestrator dispatches
+a task graph to the Developer, a read-only consistency check runs over
+(Planner task graph + Architect ADR + baseline memory) and reports:
+- duplications against existing specs/ADRs,
+- ambiguities (vague acceptance criteria, untestable requirements),
+- coverage gaps (intent items with no task, tasks with no acceptance
+  criterion),
+- conflicts with prior decisions in memory.
+
+Failures block dispatch and surface to the user for revision. Implemented
+as a `spec-consistency` skill (MCP-callable, so Planner and Architect can
+also self-check) rather than a separate agent.
+
+**Verification Engine.** The Reviewer in §5.6 is split into two stages:
+1. **Deterministic Verification Engine** (runtime-owned, *not* an agent).
+   Runs after every Developer hand-off: project test suite, type checker,
+   linter, optional Semgrep, optional contract checks (Schemathesis /
+   OpenAPI). Outputs structured results. **The hand-off is gated on this
+   stage.** Tool selection is per-project config; the engine is a thin
+   harness, not a re-implementation.
+2. **Model Reviewer** (the existing §5.6 agent). Runs only after the
+   deterministic stage passes. Judges what tools cannot — correctness
+   against intent, style, security nuance, scope creep.
+
+Deterministic failures route straight back to Developer with the tool
+output attached. The two-rejections → Architect arbitration flow in §5.6
+applies to the **model Reviewer stage only**.
+
+### 4.9 Bidirectional traceability
+
+The run journal already records the full chain (intent → Planner task →
+ADR → Developer patch → Verification Engine results → Reviewer verdict).
+Exposing it bidirectionally is a surfacing concern, not a storage one: a
+new CLI view (§8.2) lets the user walk forward from any requirement to
+its consequences (tasks, patches, tests) and backward from any patch or
+test failure to the requirement that produced it. Same data, queryable
+from either end.
+
 ---
 
 ## 5. Agent Catalog (v1)
@@ -375,7 +425,11 @@ Full system prompts live in `plugins/agents/<name>/system.md`.
 
 ### 5.6 Reviewer
 - **Role:** Code review — correctness, style, security, scope creep.
-- **Inputs:** patch, task spec, ADR.
+- **Stage:** Runs as the **second** verification stage. The deterministic
+  Verification Engine (§4.8) gates the Developer hand-off first; the
+  Reviewer only sees patches that already pass tests, types, lint, and
+  any configured static-analysis tools.
+- **Inputs:** patch, task spec, ADR, Verification Engine report.
 - **Outputs:** review comments (severity-tagged), overall verdict
   (`approve` / `request-changes`).
 - **Read-only** tool set; cannot edit files.
@@ -483,6 +537,8 @@ print(result.run_id)           # for inspection / replay
 hira run "Add a rate limiter to login"
 hira runs list
 hira runs show <run_id>        # full transcript + hand-off tree
+hira runs trace <run_id>       # bidirectional view: req ↔ task ↔ ADR ↔ patch ↔ tests (§4.9)
+hira runs trace <artifact_id>  # walk from any artifact in either direction
 hira memory query "rate limit"
 hira agents list
 hira plugins reload
@@ -560,8 +616,9 @@ runs:
 | --------- | ----- |
 | **M0.1 — Skeleton** ✅ | pnpm/TS workspace, plugin loader (zod-validated), eight agent manifests with placeholder prompts, `hira agents list`. *(Landed in `1b9c4a2`.)* |
 | **M0.2 — Session driver** ✅ | `@hira/session` spawns a single `claude -p` subprocess (Orchestrator role), captures stream-json events, returns the assistant reply. `hira run "<msg>"` works end-to-end against the Pro subscription. `--dry-run` prints the assembled invocation. *(Landed in `367fd06`.)* |
-| **M0.3 — Agent isolation** ✅ | Per-agent isolation directory at `.hira/runs/<run_id>/<agent>/`, generated `settings.json` with empty `hooks` + tool allowlist as `permissions.allow`, `--setting-sources ""` to suppress host `~/.claude` and project `.claude/` inheritance. Verified the stop-hook contamination from §12-#10 is gone on the dev sandbox; added an opt-in e2e test (`HIRA_E2E=1`). |
+| **M0.3 — Agent isolation** ✅ | Per-agent isolation directory at `.hira/runs/<run_id>/<agent>/`, generated `settings.json` with empty `hooks` + tool allowlist as `permissions.allow`, `--setting-sources ""` to suppress host `~/.claude` and project `.claude/` inheritance. Verified the stop-hook contamination from §12-#16 is gone on the dev sandbox; added an opt-in e2e test (`HIRA_E2E=1`). |
 | **M1 — Single track** | Orchestrator → Planner → Developer → Tester → Reviewer working on a real task, with the typed Handoff envelope and the SQLite run journal. No memory yet. |
+| **M1.5 — Spec lifecycle & verification gates** | Spec/ADR delta state machine (§4.8); `spec-consistency` MCP skill for the Cross-Artifact Consistency pass; deterministic Verification Engine harness (test runner + type/lint, optional Semgrep/Schemathesis) gating the Developer→Reviewer hand-off; bidirectional traceability view (`hira runs trace`, §4.9). |
 | **M2 — Memory**       | Memory Maintainer wired up; ADRs and glossary written and queryable; Knowledge agent reads from memory. |
 | **M3 — Robust hand-offs** | Schema validation enforced both ways, journal replay command, budgets + rate-limit handling (§4.7), failure modes (timeout, malformed JSON reply, missing `claude` binary). |
 | **M4 — Surfaces**     | HTTP API, web UI shell, GitHub PR comment surface. |
@@ -587,17 +644,36 @@ runs:
    the runtime, not the agent.
 6. **Skills are MCP servers** when the model must invoke them;
    between-hand-off skills (e.g. test suite) stay outside MCP (§4.6).
+7. **Spec/ADR delta state machine** with explicit pre-merge gates;
+   Runs produce deltas, baseline only changes on user approval (§4.8).
+8. **Cross-Artifact Consistency pass** runs between planning and
+   Developer dispatch, implemented as a `spec-consistency` skill, not a
+   new agent (§4.8).
+9. **Two-stage verification:** a deterministic, runtime-owned
+   Verification Engine gates the Developer→Reviewer hand-off; the model
+   Reviewer is the second stage and only judges what tools cannot
+   (§4.8, §5.6).
+10. **Bidirectional traceability** is a surfacing concern over the
+    existing journal, exposed via `hira runs trace` (§4.9).
 
 ### Still open
-7. **Memory granularity** — what gets remembered automatically vs what
-   requires an explicit "remember this" from the user?
-8. **`--resume` durability** — does Claude Code guarantee a captured
-   `session_id` is resumable later in the same Run, or do we need to
-   pin a CLI version? Validate before relying on warm mode in M1.
-9. **Concurrency vs quota** — should fan-out (parallel Reviewers) be
-   gated by a runtime semaphore, or do we let it rip and react to
-   rate-limit errors? Decide once we observe real quota behaviour.
-10. ~~**Agent isolation from host Claude Code config**~~ — **resolved in
+11. **Memory granularity** — what gets remembered automatically vs what
+    requires an explicit "remember this" from the user?
+12. **`--resume` durability** — does Claude Code guarantee a captured
+    `session_id` is resumable later in the same Run, or do we need to
+    pin a CLI version? Validate before relying on warm mode in M1.
+13. **Concurrency vs quota** — should fan-out (parallel Reviewers) be
+    gated by a runtime semaphore, or do we let it rip and react to
+    rate-limit errors? Decide once we observe real quota behaviour.
+14. **Verification Engine tool defaults** (§4.8) — which deterministic
+    checks are on by default for a fresh project (test runner + lint
+    seem obvious; Semgrep / Schemathesis are heavy and language-specific)
+    and how is per-project config surfaced? Defer until M1.5.
+15. **Spec-consistency severity policy** (§4.8) — duplications and
+    coverage gaps are clearly blocking; "ambiguity" is judgement-heavy.
+    Decide what severities block dispatch vs. just warn the user once
+    we see real Run output.
+16. ~~**Agent isolation from host Claude Code config**~~ — **resolved in
     M0.3.** Default `SessionInvocation.settingSources = []` plus a
     Hira-generated per-agent `settings.json` (empty `hooks`, allowlist
     mirrored into `permissions.allow`) drops the host's hooks, project
