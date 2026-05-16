@@ -1,9 +1,10 @@
 import { Command } from 'commander';
-import { resolve } from 'node:path';
+import { resolve, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import {
   loadPlugins,
   SessionDriver,
+  prepareAgentIsolation,
   type LoadedAgent,
   type SessionInvocation,
 } from '@hira/runtime';
@@ -57,6 +58,14 @@ program
         process.exit(1);
       }
 
+      const runId = randomUUID();
+      const runDir = join(root, '.hira', 'runs', runId);
+      const isolation = await prepareAgentIsolation({
+        runDir,
+        agentName: orchestrator.manifest.name,
+        allowedTools: orchestrator.manifest.tools,
+      });
+
       const invocation: SessionInvocation = {
         binary: opts.binary,
         prompt: message,
@@ -67,6 +76,8 @@ program
         sessionId: randomUUID(),
         noSessionPersistence: true,
         outputFormat: 'stream-json',
+        settingSources: [], // ignore host ~/.claude and project .claude
+        settingsPath: isolation.settingsPath,
       };
 
       const driver = new SessionDriver();

@@ -18,6 +18,7 @@ export {
   isResult,
   isSystemInit,
   extractAssistantText,
+  prepareAgentIsolation,
 } from '@hira/session';
 export type {
   SessionInvocation,
@@ -28,4 +29,6 @@ export type {
   SystemInitEvent,
   AssistantEvent,
   ResultEvent,
+  IsolationRequest,
+  IsolationArtifacts,
 } from '@hira/session';

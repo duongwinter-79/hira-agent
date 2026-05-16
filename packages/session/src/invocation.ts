@@ -33,6 +33,18 @@ export type SessionInvocation = {
   mcpConfig?: string[];
   /** Output format. Hira defaults to stream-json. */
   outputFormat?: 'stream-json' | 'json' | 'text';
+  /**
+   * Which host setting sources to load. Hira defaults to `[]` (none) so
+   * agent reasoning is not derailed by user/project hooks. Pass `undefined`
+   * to use Claude Code's default behaviour (load all sources).
+   */
+  settingSources?: Array<'user' | 'project' | 'local'>;
+  /**
+   * Path to a Hira-generated settings file (passed via `--settings`).
+   * Used to inject per-agent permissions and an empty `hooks` object so
+   * nothing inherited can fire.
+   */
+  settingsPath?: string;
 };
 
 /**
@@ -82,6 +94,14 @@ export function buildArgs(inv: SessionInvocation): { binary: string; args: strin
 
   if (inv.mcpConfig && inv.mcpConfig.length > 0) {
     args.push('--mcp-config', ...inv.mcpConfig);
+  }
+
+  if (inv.settingSources !== undefined) {
+    args.push('--setting-sources', inv.settingSources.join(','));
+  }
+
+  if (inv.settingsPath) {
+    args.push('--settings', inv.settingsPath);
   }
 
   const outputFormat = inv.outputFormat ?? 'stream-json';

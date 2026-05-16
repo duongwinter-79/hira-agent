@@ -84,4 +84,40 @@ describe('buildArgs', () => {
     expect(args).toContain('--model');
     expect(args).toContain('opus');
   });
+
+  it('emits --setting-sources with empty value when sources is []', () => {
+    const { args } = buildArgs({
+      binary: 'claude',
+      prompt: 'hi',
+      settingSources: [],
+    });
+    const i = args.indexOf('--setting-sources');
+    expect(i).toBeGreaterThanOrEqual(0);
+    expect(args[i + 1]).toBe('');
+  });
+
+  it('comma-joins multiple setting sources', () => {
+    const { args } = buildArgs({
+      binary: 'claude',
+      prompt: 'hi',
+      settingSources: ['local', 'project'],
+    });
+    const i = args.indexOf('--setting-sources');
+    expect(args[i + 1]).toBe('local,project');
+  });
+
+  it('omits --setting-sources entirely when undefined (default CC behaviour)', () => {
+    const { args } = buildArgs({ binary: 'claude', prompt: 'hi' });
+    expect(args).not.toContain('--setting-sources');
+  });
+
+  it('passes --settings when a settingsPath is provided', () => {
+    const { args } = buildArgs({
+      binary: 'claude',
+      prompt: 'hi',
+      settingsPath: '/tmp/run/orchestrator/settings.json',
+    });
+    const i = args.indexOf('--settings');
+    expect(args[i + 1]).toBe('/tmp/run/orchestrator/settings.json');
+  });
 });

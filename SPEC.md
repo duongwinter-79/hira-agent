@@ -559,7 +559,8 @@ runs:
 | Milestone | Scope |
 | --------- | ----- |
 | **M0.1 — Skeleton** ✅ | pnpm/TS workspace, plugin loader (zod-validated), eight agent manifests with placeholder prompts, `hira agents list`. *(Landed in `1b9c4a2`.)* |
-| **M0.2 — Session driver** | `@hira/session` spawns a single `claude -p` subprocess (Orchestrator role), captures stream-json events, parses the fenced JSON reply. `hira run "<msg>"` works end-to-end against the Pro subscription. `--dry-run` prints the assembled invocation without spawning. |
+| **M0.2 — Session driver** ✅ | `@hira/session` spawns a single `claude -p` subprocess (Orchestrator role), captures stream-json events, returns the assistant reply. `hira run "<msg>"` works end-to-end against the Pro subscription. `--dry-run` prints the assembled invocation. *(Landed in `367fd06`.)* |
+| **M0.3 — Agent isolation** ✅ | Per-agent isolation directory at `.hira/runs/<run_id>/<agent>/`, generated `settings.json` with empty `hooks` + tool allowlist as `permissions.allow`, `--setting-sources ""` to suppress host `~/.claude` and project `.claude/` inheritance. Verified the stop-hook contamination from §12-#10 is gone on the dev sandbox; added an opt-in e2e test (`HIRA_E2E=1`). |
 | **M1 — Single track** | Orchestrator → Planner → Developer → Tester → Reviewer working on a real task, with the typed Handoff envelope and the SQLite run journal. No memory yet. |
 | **M2 — Memory**       | Memory Maintainer wired up; ADRs and glossary written and queryable; Knowledge agent reads from memory. |
 | **M3 — Robust hand-offs** | Schema validation enforced both ways, journal replay command, budgets + rate-limit handling (§4.7), failure modes (timeout, malformed JSON reply, missing `claude` binary). |
@@ -596,14 +597,16 @@ runs:
 9. **Concurrency vs quota** — should fan-out (parallel Reviewers) be
    gated by a runtime semaphore, or do we let it rip and react to
    rate-limit errors? Decide once we observe real quota behaviour.
-10. **Agent isolation from host Claude Code config** — observed in M0.2
-    smoke tests: a spawned `claude` subprocess inherits the host's
-    settings, hooks, and CLAUDE.md auto-discovery. When the host has a
-    stop-hook installed, the agent's reasoning gets derailed into
-    addressing the hook instead of the user's task. Need an explicit
-    isolation mode: generate a per-agent settings file (via `--settings`),
-    point at a clean config dir, and exclude host `.claude/` inheritance.
-    Address in M0.3 before M1 lands hand-offs.
+10. ~~**Agent isolation from host Claude Code config**~~ — **resolved in
+    M0.3.** Default `SessionInvocation.settingSources = []` plus a
+    Hira-generated per-agent `settings.json` (empty `hooks`, allowlist
+    mirrored into `permissions.allow`) drops the host's hooks, project
+    `.claude/`, and inherited permissions. CLAUDE.md auto-discovery from
+    the agent's `--cwd` is **not** suppressed by this — fine for the
+    Orchestrator (no tools, no file reads) but revisit when agents
+    operate with `--cwd <project root>` and a stale CLAUDE.md could
+    inject noise. Likely needs an opt-in `--add-dir` + scoped cwd
+    pattern in M1.
 
 ---
 
