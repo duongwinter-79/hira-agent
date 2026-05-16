@@ -592,10 +592,18 @@ runs:
    requires an explicit "remember this" from the user?
 8. **`--resume` durability** — does Claude Code guarantee a captured
    `session_id` is resumable later in the same Run, or do we need to
-   pin a CLI version? Verify against the installed CLI in M0.2.
+   pin a CLI version? Validate before relying on warm mode in M1.
 9. **Concurrency vs quota** — should fan-out (parallel Reviewers) be
    gated by a runtime semaphore, or do we let it rip and react to
    rate-limit errors? Decide once we observe real quota behaviour.
+10. **Agent isolation from host Claude Code config** — observed in M0.2
+    smoke tests: a spawned `claude` subprocess inherits the host's
+    settings, hooks, and CLAUDE.md auto-discovery. When the host has a
+    stop-hook installed, the agent's reasoning gets derailed into
+    addressing the hook instead of the user's task. Need an explicit
+    isolation mode: generate a per-agent settings file (via `--settings`),
+    point at a clean config dir, and exclude host `.claude/` inheritance.
+    Address in M0.3 before M1 lands hand-offs.
 
 ---
 
