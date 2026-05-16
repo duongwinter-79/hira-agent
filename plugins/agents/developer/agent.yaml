@@ -2,6 +2,8 @@ name: developer
 version: 0.0.1
 kind: agent
 prompt: ./system.md
+skills:
+  - karpathy-guidelines
 tools:
   - Read
   - Edit
