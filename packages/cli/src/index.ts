@@ -2,16 +2,15 @@ import { Command } from 'commander';
 import { resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import {
+  Bus,
   Journal,
   SessionDriver,
   composeSystemPrompt,
   loadBehaviouralSkills,
   loadPlugins,
-  prepareAgentIsolation,
   type Handoff,
   type LoadedAgent,
   type LoadedSkill,
-  type SessionInvocation,
 } from '@hira/runtime';
 
 const program = new Command();
@@ -47,7 +46,7 @@ agents
 
 program
   .command('run')
-  .description('Run the Orchestrator on a single user message')
+  .description('Run the Orchestrator on a single user message (may dispatch to Planner)')
   .argument('<message>', 'the user message to send to the Orchestrator')
   .option('--root <path>', 'project root', process.cwd())
   .option('--dry-run', 'print the assembled claude invocation without spawning')
@@ -67,14 +66,14 @@ program
         process.exit(1);
       }
 
-      const systemPrompt = await renderSystemPrompt(orchestrator, skills);
+      const orchestratorPrompt = await renderSystemPrompt(orchestrator, skills);
 
       if (opts.dryRun) {
         const driver = new SessionDriver();
         const dry = driver.dryRun({
           binary: opts.binary,
           prompt: message,
-          systemPrompt,
+          systemPrompt: orchestratorPrompt,
           allowedTools: orchestrator.manifest.tools,
           permissionMode: 'acceptEdits',
           cwd: root,
@@ -89,60 +88,93 @@ program
 
       const journal = new Journal(root);
       const run = await journal.openRun(message);
-      const runDir = journal.runDir(run.id);
-
-      const isolation = await prepareAgentIsolation({
-        runDir,
-        agentName: orchestrator.manifest.name,
-        allowedTools: orchestrator.manifest.tools,
-      });
-
-      const handoff: Handoff = {
-        run_id: run.id,
-        handoff_id: randomUUID(),
-        from: 'user',
-        to: 'orchestrator',
-        kind: 'request',
-        payload: { message },
-        artifacts: [],
-        delta_refs: [],
-      };
-      await journal.recordHandoffStart(handoff);
-
-      const invocation: SessionInvocation = {
-        binary: opts.binary,
-        prompt: message,
-        systemPrompt,
-        allowedTools: orchestrator.manifest.tools,
-        permissionMode: 'acceptEdits',
-        cwd: root,
-        sessionId: randomUUID(),
-        noSessionPersistence: true,
-        outputFormat: 'stream-json',
-        settingSources: [],
-        settingsPath: isolation.settingsPath,
-      };
-
       const driver = new SessionDriver();
-      const result = await driver.run(invocation);
-
-      await journal.completeHandoff(run.id, handoff.handoff_id, {
-        status: result.exitCode === 0 ? 'completed' : 'failed',
-        session_id: result.sessionId,
-        response_text: result.text,
-        exit_code: result.exitCode,
-        stderr_excerpt: result.stderr.slice(0, 2048) || undefined,
+      const bus = new Bus({
+        agents,
+        skills,
+        journal,
+        projectRoot: root,
+        driver,
+        binary: opts.binary,
       });
-      await journal.closeRun(run.id, result.exitCode === 0 ? 'succeeded' : 'failed');
 
-      if (result.exitCode !== 0) {
-        console.error(`claude exited with code ${result.exitCode}`);
-        if (result.stderr) console.error(result.stderr.trimEnd());
+      try {
+        // Hand-off 1: user → orchestrator (intent classification)
+        const orcEnvelope: Handoff = {
+          run_id: run.id,
+          handoff_id: randomUUID(),
+          from: 'user',
+          to: 'orchestrator',
+          kind: 'request',
+          payload: { message },
+          artifacts: [],
+          delta_refs: [],
+        };
+        const orcResult = await bus.dispatch(orcEnvelope);
+
+        if (orcResult.exitCode !== 0) {
+          fail(journal, run.id, `orchestrator exited with code ${orcResult.exitCode}`, orcResult.stderrExcerpt);
+          return;
+        }
+
+        const decision = parseDecision(orcResult);
+        if (!decision) {
+          // Orchestrator didn't follow the contract; fall back to its raw text.
+          process.stdout.write(orcResult.responseText.trimEnd() + '\n');
+          process.stderr.write(`(warning: orchestrator output had no parseable fenced JSON)\n`);
+          await journal.closeRun(run.id, 'succeeded');
+          console.error(`(run_id: ${run.id})`);
+          return;
+        }
+
+        if (decision.action === 'reply') {
+          process.stdout.write(decision.message.trimEnd() + '\n');
+          await journal.closeRun(run.id, 'succeeded');
+          console.error(`(run_id: ${run.id})`);
+          return;
+        }
+
+        // Hand-off 2: orchestrator → planner
+        const planEnvelope: Handoff = {
+          run_id: run.id,
+          handoff_id: randomUUID(),
+          parent_handoff_id: orcEnvelope.handoff_id,
+          from: 'orchestrator',
+          to: decision.target,
+          kind: 'request',
+          payload: decision.payload,
+          artifacts: [],
+          delta_refs: [],
+        };
+        const planResult = await bus.dispatch(planEnvelope);
+
+        if (planResult.exitCode !== 0) {
+          fail(
+            journal,
+            run.id,
+            `${decision.target} exited with code ${planResult.exitCode}`,
+            planResult.stderrExcerpt,
+          );
+          return;
+        }
+
+        // M1.2: surface the plan to the user. M1.3 will add a synthesis pass
+        // through the orchestrator that turns the structured plan into prose.
+        process.stdout.write(`Dispatched to ${decision.target}. Plan:\n`);
+        if (planResult.response !== null) {
+          process.stdout.write(JSON.stringify(planResult.response, null, 2) + '\n');
+        } else {
+          process.stdout.write(planResult.responseText.trimEnd() + '\n');
+          process.stderr.write(
+            `(warning: ${decision.target} output had no parseable fenced JSON)\n`,
+          );
+        }
+        await journal.closeRun(run.id, 'succeeded');
         console.error(`(run_id: ${run.id})`);
-        process.exit(result.exitCode || 1);
+      } catch (err) {
+        await journal.closeRun(run.id, 'failed').catch(() => undefined);
+        throw err;
       }
-      process.stdout.write(result.text.trimEnd() + '\n');
-      console.error(`(run_id: ${run.id})`);
     },
   );
 
@@ -199,7 +231,10 @@ runs
         h.ended_at && h.started_at
           ? ` (${Math.round((Date.parse(h.ended_at) - Date.parse(h.started_at)) / 100) / 10}s)`
           : '';
-      console.log(`  - ${h.handoff_id}  ${h.kind.padEnd(10)} ${arrow}  ${h.status}${dur}`);
+      const parent = h.parent_handoff_id ? `  parent=${h.parent_handoff_id}` : '';
+      console.log(
+        `  - ${h.handoff_id}  ${h.kind.padEnd(10)} ${arrow}  ${h.status}${dur}${parent}`,
+      );
       if (h.exit_code !== undefined && h.exit_code !== 0) {
         console.log(`      exit_code: ${h.exit_code}`);
       }
@@ -234,3 +269,41 @@ async function renderSystemPrompt(
   const behavioural = await loadBehaviouralSkills(skills, agent.manifest.skills);
   return composeSystemPrompt(agent.systemPrompt, behavioural);
 }
+
+type OrchestratorDecision =
+  | { action: 'reply'; message: string }
+  | { action: 'dispatch'; target: string; payload: unknown };
+
+function parseDecision(result: {
+  response: unknown | null;
+}): OrchestratorDecision | null {
+  const r = result.response;
+  if (!r || typeof r !== 'object') return null;
+  const action = (r as { action?: unknown }).action;
+  if (action === 'reply') {
+    const message = (r as { message?: unknown }).message;
+    if (typeof message !== 'string') return null;
+    return { action: 'reply', message };
+  }
+  if (action === 'dispatch') {
+    const target = (r as { target?: unknown }).target;
+    if (typeof target !== 'string') return null;
+    const payload = (r as { payload?: unknown }).payload;
+    return { action: 'dispatch', target, payload };
+  }
+  return null;
+}
+
+async function fail(
+  journal: Journal,
+  runId: string,
+  message: string,
+  stderrExcerpt?: string,
+): Promise<never> {
+  console.error(message);
+  if (stderrExcerpt) console.error(stderrExcerpt.trimEnd());
+  console.error(`(run_id: ${runId})`);
+  await journal.closeRun(runId, 'failed');
+  process.exit(1);
+}
+
