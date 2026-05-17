@@ -173,4 +173,30 @@ describe('Bus.dispatch', () => {
     expect(result.response).toBeNull();
     expect(result.responseText).toBe('just prose, no fenced block');
   });
+
+  it('honours an options.tools override on the dispatched invocation', async () => {
+    const projectRoot = await mkdtemp(join(tmpdir(), 'hira-bus-'));
+    const journal = new Journal(projectRoot);
+    const run = await journal.openRun('test');
+
+    let captured: { allowedTools?: string[] } = {};
+    const driver: BusDriver = {
+      async run(invocation) {
+        captured = { allowedTools: invocation.allowedTools };
+        return { text: '```json\n{}\n```', sessionId: 's', events: [], exitCode: 0, stderr: '' };
+      },
+    };
+
+    const bus = makeBus({
+      agents: [agent('orchestrator')],
+      driver,
+      journal,
+      projectRoot,
+    });
+
+    await bus.dispatch(makeHandoff('user', 'orchestrator', run.id), {
+      tools: ['Read', 'Grep'],
+    });
+    expect(captured.allowedTools).toEqual(['Read', 'Grep']);
+  });
 });
