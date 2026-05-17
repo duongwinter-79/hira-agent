@@ -53,3 +53,7 @@ export type {
   Artifact,
   VerificationReport,
 } from '@hira/journal';
+
+export { Bus } from './bus.js';
+export type { BusConfig, BusDriver, DispatchResult } from './bus.js';
+export { extractFencedJson } from './fence.js';
