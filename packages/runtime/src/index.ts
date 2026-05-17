@@ -55,5 +55,14 @@ export type {
 } from '@hira/journal';
 
 export { Bus } from './bus.js';
-export type { BusConfig, BusDriver, DispatchResult } from './bus.js';
+export type { BusConfig, BusDriver, DispatchResult, DispatchOptions } from './bus.js';
 export { extractFencedJson } from './fence.js';
+export { Executor } from './executor.js';
+export type {
+  ExecutorConfig,
+  ExecutorInput,
+  ExecutorOutput,
+  PlannerTask,
+  TaskExecution,
+} from './executor.js';
+export { verifyDeveloperHandoff } from './verification.js';

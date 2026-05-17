@@ -42,6 +42,18 @@ export type DispatchResult = {
   stderrExcerpt?: string;
 };
 
+export type DispatchOptions = {
+  /**
+   * Override the target agent's manifest tool allowlist for this single
+   * dispatch. Used by the Executor in M1.3 to keep specialist runs
+   * read-only until the deterministic Verification Engine lands (M1.5).
+   *
+   * The override REPLACES the manifest list — pass `[]` to disable every
+   * built-in tool.
+   */
+  tools?: string[];
+};
+
 /**
  * Brokers a single hand-off:
  *   - validates the target exists and the source is allowed to escalate to it,
@@ -58,7 +70,7 @@ export type DispatchResult = {
 export class Bus {
   constructor(private readonly cfg: BusConfig) {}
 
-  async dispatch(envelope: Handoff): Promise<DispatchResult> {
+  async dispatch(envelope: Handoff, options: DispatchOptions = {}): Promise<DispatchResult> {
     const target = this.cfg.agents.find((a) => a.manifest.name === envelope.to);
     if (!target) {
       throw new Error(`Bus: unknown target agent '${envelope.to}'`);
@@ -68,11 +80,13 @@ export class Bus {
     const behavioural = await loadBehaviouralSkills(this.cfg.skills, target.manifest.skills);
     const systemPrompt = composeSystemPrompt(target.systemPrompt, behavioural);
 
+    const allowedTools = options.tools ?? target.manifest.tools;
+
     const runDir = this.cfg.journal.runDir(envelope.run_id);
     const isolation = await prepareAgentIsolation({
       runDir,
       agentName: target.manifest.name,
-      allowedTools: target.manifest.tools,
+      allowedTools,
     });
 
     await this.cfg.journal.recordHandoffStart(envelope);
@@ -81,7 +95,7 @@ export class Bus {
       binary: this.cfg.binary,
       prompt: renderPromptForHandoff(envelope),
       systemPrompt,
-      allowedTools: target.manifest.tools,
+      allowedTools,
       permissionMode: 'acceptEdits',
       cwd: this.cfg.projectRoot,
       sessionId: randomUUID(),

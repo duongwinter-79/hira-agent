@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import {
   Bus,
+  Executor,
   Journal,
   SessionDriver,
   composeSystemPrompt,
@@ -11,7 +12,18 @@ import {
   type Handoff,
   type LoadedAgent,
   type LoadedSkill,
+  type PlannerTask,
+  type TaskExecution,
 } from '@hira/runtime';
+
+/** Specialist agents wired with real system prompts in this milestone. */
+const WIRED_OWNERS = new Set<string>(['knowledge', 'solution-architect']);
+
+/**
+ * Tool override for specialist invocations. M1.3 keeps every specialist
+ * read-only until the deterministic Verification Engine lands in M1.5.
+ */
+const SPECIALIST_READ_ONLY_TOOLS = ['Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch'];
 
 const program = new Command();
 program.name('hira').description('Hira multi-agent orchestrator').version('0.0.1');
@@ -46,7 +58,7 @@ agents
 
 program
   .command('run')
-  .description('Run the Orchestrator on a single user message (may dispatch to Planner)')
+  .description('Run the Orchestrator on a single user message')
   .argument('<message>', 'the user message to send to the Orchestrator')
   .option('--root <path>', 'project root', process.cwd())
   .option('--dry-run', 'print the assembled claude invocation without spawning')
@@ -99,7 +111,7 @@ program
       });
 
       try {
-        // Hand-off 1: user → orchestrator (intent classification)
+        // Hand-off 1: user → orchestrator (intent classification).
         const orcEnvelope: Handoff = {
           run_id: run.id,
           handoff_id: randomUUID(),
@@ -113,13 +125,12 @@ program
         const orcResult = await bus.dispatch(orcEnvelope);
 
         if (orcResult.exitCode !== 0) {
-          fail(journal, run.id, `orchestrator exited with code ${orcResult.exitCode}`, orcResult.stderrExcerpt);
+          await fail(journal, run.id, `orchestrator exited with code ${orcResult.exitCode}`, orcResult.stderrExcerpt);
           return;
         }
 
         const decision = parseDecision(orcResult);
         if (!decision) {
-          // Orchestrator didn't follow the contract; fall back to its raw text.
           process.stdout.write(orcResult.responseText.trimEnd() + '\n');
           process.stderr.write(`(warning: orchestrator output had no parseable fenced JSON)\n`);
           await journal.closeRun(run.id, 'succeeded');
@@ -134,7 +145,7 @@ program
           return;
         }
 
-        // Hand-off 2: orchestrator → planner
+        // Hand-off 2: orchestrator → planner.
         const planEnvelope: Handoff = {
           run_id: run.id,
           handoff_id: randomUUID(),
@@ -149,7 +160,7 @@ program
         const planResult = await bus.dispatch(planEnvelope);
 
         if (planResult.exitCode !== 0) {
-          fail(
+          await fail(
             journal,
             run.id,
             `${decision.target} exited with code ${planResult.exitCode}`,
@@ -158,15 +169,71 @@ program
           return;
         }
 
-        // M1.2: surface the plan to the user. M1.3 will add a synthesis pass
-        // through the orchestrator that turns the structured plan into prose.
-        process.stdout.write(`Dispatched to ${decision.target}. Plan:\n`);
-        if (planResult.response !== null) {
-          process.stdout.write(JSON.stringify(planResult.response, null, 2) + '\n');
-        } else {
+        const tasks = parseTasks(planResult.response);
+        if (tasks === null) {
+          // Planner didn't follow the contract; surface its raw output.
+          process.stdout.write(`Dispatched to ${decision.target}. Plan:\n`);
           process.stdout.write(planResult.responseText.trimEnd() + '\n');
           process.stderr.write(
-            `(warning: ${decision.target} output had no parseable fenced JSON)\n`,
+            `(warning: ${decision.target} produced no parseable task graph; executor skipped)\n`,
+          );
+          await journal.closeRun(run.id, 'succeeded');
+          console.error(`(run_id: ${run.id})`);
+          return;
+        }
+
+        // Walk the task graph through wired specialists.
+        const executor = new Executor({
+          bus,
+          journal,
+          wiredOwners: WIRED_OWNERS,
+          toolsOverride: SPECIALIST_READ_ONLY_TOOLS,
+        });
+        const execOut = await executor.run({
+          runId: run.id,
+          parentHandoffId: planEnvelope.handoff_id,
+          tasks,
+        });
+
+        if (execOut.graph_error) {
+          await fail(journal, run.id, `Planner produced an invalid task graph: ${execOut.graph_error}`);
+          return;
+        }
+
+        // Synthesis: hand back to the orchestrator with the full chain so
+        // it can compose a user-facing reply.
+        const synthEnvelope: Handoff = {
+          run_id: run.id,
+          handoff_id: randomUUID(),
+          parent_handoff_id: planEnvelope.handoff_id,
+          from: 'user',
+          to: 'orchestrator',
+          kind: 'response',
+          payload: { message: buildSynthesisPrompt(message, planResult.response, execOut.executions) },
+          artifacts: [],
+          delta_refs: [],
+        };
+        const synthResult = await bus.dispatch(synthEnvelope);
+
+        if (synthResult.exitCode !== 0) {
+          await fail(
+            journal,
+            run.id,
+            `orchestrator (synthesis) exited with code ${synthResult.exitCode}`,
+            synthResult.stderrExcerpt,
+          );
+          return;
+        }
+
+        const synthDecision = parseDecision(synthResult);
+        const summary =
+          synthDecision?.action === 'reply'
+            ? synthDecision.message
+            : synthResult.responseText;
+        process.stdout.write(summary.trimEnd() + '\n');
+        if (synthDecision?.action !== 'reply') {
+          process.stderr.write(
+            `(warning: orchestrator synthesis returned no parseable {action:'reply'} block)\n`,
           );
         }
         await journal.closeRun(run.id, 'succeeded');
@@ -294,6 +361,56 @@ function parseDecision(result: {
   return null;
 }
 
+function parseTasks(response: unknown): PlannerTask[] | null {
+  if (!response || typeof response !== 'object') return null;
+  const raw = (response as { tasks?: unknown }).tasks;
+  if (!Array.isArray(raw)) return null;
+  const tasks: PlannerTask[] = [];
+  for (const r of raw) {
+    if (!r || typeof r !== 'object') return null;
+    const t = r as Partial<PlannerTask>;
+    if (
+      typeof t.id !== 'string' ||
+      typeof t.description !== 'string' ||
+      typeof t.owner !== 'string' ||
+      !Array.isArray(t.depends_on) ||
+      !t.depends_on.every((d) => typeof d === 'string')
+    ) {
+      return null;
+    }
+    tasks.push({ id: t.id, description: t.description, owner: t.owner, depends_on: t.depends_on });
+  }
+  return tasks;
+}
+
+function buildSynthesisPrompt(
+  intent: string,
+  plan: unknown,
+  executions: TaskExecution[],
+): string {
+  const taskResults = executions.map((e) => ({
+    task_id: e.task.id,
+    owner: e.task.owner,
+    status: e.status,
+    skip_reason: e.skip_reason,
+    response: e.response,
+    verification: e.verification,
+  }));
+  return [
+    'SYNTHESIS REQUEST',
+    '',
+    `original_intent: ${intent}`,
+    '',
+    'plan:',
+    JSON.stringify(plan, null, 2),
+    '',
+    'task_results (in dependency order):',
+    JSON.stringify(taskResults, null, 2),
+    '',
+    'Compose the user-facing reply per your synthesis rules.',
+  ].join('\n');
+}
+
 async function fail(
   journal: Journal,
   runId: string,
@@ -306,4 +423,3 @@ async function fail(
   await journal.closeRun(runId, 'failed');
   process.exit(1);
 }
-
