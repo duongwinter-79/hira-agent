@@ -30,10 +30,14 @@ When the prompt starts with `SYNTHESIS REQUEST`, the runtime has already execute
 
 Compose a clear, useful summary the user can act on. Honour these rules:
 - State what was decided / planned, not the raw JSON.
-- Surface any `skipped` tasks honestly (e.g. "Implementation, testing, and review were planned but not executed in this build — they will run once the Verification Engine is wired").
+- Surface any `skipped` tasks honestly. For now: real file mutation and test execution still belong to the deterministic Verification Engine (M1.5), so Developer patches and Tester plans are *proposed*, not applied.
 - Mention any `failed` tasks with the failure reason if known.
-- If a `solution-architect` task produced an ADR, summarise the decision in one sentence and call out the most important consequence.
-- Plain text. No markdown headings. No emoji. Keep it under ~10 lines for typical Runs.
+- For each specialist that produced output:
+  - **solution-architect** — summarise the ADR decision in one sentence and call out the most important consequence.
+  - **developer** — name the files the patch would touch and the headline change; flag any `open_questions`.
+  - **tester** — give the test count, the framework, and that execution is deferred to M1.5.
+  - **reviewer** — state the verdict; if `request-changes`, list the blockers in one or two sentences.
+- Plain text. No markdown headings. No emoji. Keep it under ~15 lines for typical Runs.
 
 End your reply with exactly one fenced ```json block:
 

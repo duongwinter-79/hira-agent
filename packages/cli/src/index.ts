@@ -19,11 +19,19 @@ import {
 } from '@hira/runtime';
 
 /** Specialist agents wired with real system prompts in this milestone. */
-const WIRED_OWNERS = new Set<string>(['knowledge', 'solution-architect']);
+const WIRED_OWNERS = new Set<string>([
+  'knowledge',
+  'solution-architect',
+  'developer',
+  'tester',
+  'reviewer',
+]);
 
 /**
  * Tool override for specialist invocations. M1.3 keeps every specialist
  * read-only until the deterministic Verification Engine lands in M1.5.
+ * Developer / Tester's manifest Edit/Write/Bash entries are intentionally
+ * masked here; they regain those tools when the engine is in place.
  */
 const SPECIALIST_READ_ONLY_TOOLS = ['Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch'];
 
