@@ -1,5 +1,7 @@
 import { Command } from 'commander';
-import { resolve } from 'node:path';
+import { resolve, dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { statSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import {
   Bus,
@@ -35,11 +37,12 @@ const agents = program.command('agents').description('Inspect configured agents'
 agents
   .command('list')
   .description('List configured agents')
-  .option('--root <path>', 'project root', process.cwd())
-  .action(async (opts: { root: string }) => {
-    const { agents } = await loadPlugins(resolve(opts.root));
+  .option('--plugins-root <path>', 'where to load agents+skills from (default: Hira install dir; env: HIRA_PLUGINS_ROOT)')
+  .action(async (opts: { pluginsRoot?: string }) => {
+    const pluginsRoot = resolvePluginsRoot(opts.pluginsRoot);
+    const { agents } = await loadPlugins(pluginsRoot);
     if (agents.length === 0) {
-      console.log('(no agents found)');
+      console.log(`(no agents found under ${pluginsRoot}/plugins/agents)`);
       return;
     }
     const namePad = Math.max(...agents.map((a) => a.manifest.name.length));
@@ -60,21 +63,23 @@ program
   .command('run')
   .description('Run the Orchestrator on a single user message')
   .argument('<message>', 'the user message to send to the Orchestrator')
-  .option('--root <path>', 'project root', process.cwd())
+  .option('--project <path>', 'project root: where .hira/ lives and agents operate', process.cwd())
+  .option('--plugins-root <path>', 'where to load agents+skills from (default: Hira install dir; env: HIRA_PLUGINS_ROOT)')
   .option('--dry-run', 'print the assembled claude invocation without spawning')
   .option('--binary <path>', 'path to the claude CLI binary', 'claude')
   .action(
     async (
       message: string,
-      opts: { root: string; dryRun?: boolean; binary: string },
+      opts: { project: string; pluginsRoot?: string; dryRun?: boolean; binary: string },
     ) => {
-      const root = resolve(opts.root);
-      const { agents, skills } = await loadPlugins(root);
+      const project = resolve(opts.project);
+      const pluginsRoot = resolvePluginsRoot(opts.pluginsRoot);
+      const { agents, skills } = await loadPlugins(pluginsRoot);
       const orchestrator = agents.find(
         (a: LoadedAgent) => a.manifest.name === 'orchestrator',
       );
       if (!orchestrator) {
-        console.error('No agent named "orchestrator" found under plugins/agents/.');
+        console.error(`No agent named "orchestrator" found under ${pluginsRoot}/plugins/agents/.`);
         process.exit(1);
       }
 
@@ -88,7 +93,7 @@ program
           systemPrompt: orchestratorPrompt,
           allowedTools: orchestrator.manifest.tools,
           permissionMode: 'acceptEdits',
-          cwd: root,
+          cwd: project,
           sessionId: randomUUID(),
           noSessionPersistence: true,
           outputFormat: 'stream-json',
@@ -98,14 +103,14 @@ program
         return;
       }
 
-      const journal = new Journal(root);
+      const journal = new Journal(project);
       const run = await journal.openRun(message);
       const driver = new SessionDriver();
       const bus = new Bus({
         agents,
         skills,
         journal,
-        projectRoot: root,
+        projectRoot: project,
         driver,
         binary: opts.binary,
       });
@@ -251,11 +256,11 @@ const runs = program.command('runs').description('Inspect Run history');
 
 runs
   .command('list')
-  .description('List recent Runs')
-  .option('--root <path>', 'project root', process.cwd())
+  .description('List recent Runs in the current project')
+  .option('--project <path>', 'project root', process.cwd())
   .option('--limit <n>', 'maximum runs to show', (v) => Number.parseInt(v, 10), 20)
-  .action(async (opts: { root: string; limit: number }) => {
-    const journal = new Journal(resolve(opts.root));
+  .action(async (opts: { project: string; limit: number }) => {
+    const journal = new Journal(resolve(opts.project));
     const list = await journal.listRuns(opts.limit);
     if (list.length === 0) {
       console.log('(no runs yet)');
@@ -276,9 +281,9 @@ runs
   .command('show')
   .description('Show a Run: hand-off tree and artifacts')
   .argument('<run_id>')
-  .option('--root <path>', 'project root', process.cwd())
-  .action(async (runId: string, opts: { root: string }) => {
-    const journal = new Journal(resolve(opts.root));
+  .option('--project <path>', 'project root', process.cwd())
+  .action(async (runId: string, opts: { project: string }) => {
+    const journal = new Journal(resolve(opts.project));
     const data = await journal.getRun(runId);
     if (!data) {
       console.error(`run not found: ${runId}`);
@@ -328,6 +333,45 @@ await program.parseAsync(process.argv).catch((err: unknown) => {
 });
 
 // ---------- helpers ----------
+
+/**
+ * Resolve the directory that contains Hira's `plugins/` tree.
+ *
+ * Resolution order:
+ *   1. Explicit --plugins-root flag.
+ *   2. HIRA_PLUGINS_ROOT environment variable.
+ *   3. Walk up from the running binary's location looking for a
+ *      sibling `plugins/agents/` directory. This works when the
+ *      CLI is invoked via the workspace (`node packages/cli/dist/...`)
+ *      or via `pnpm link --global` (which symlinks but
+ *      `import.meta.url` still resolves to the real file).
+ *
+ * If none match, prints a helpful error and exits.
+ */
+function resolvePluginsRoot(explicit?: string): string {
+  if (explicit) return resolve(explicit);
+  if (process.env.HIRA_PLUGINS_ROOT) return resolve(process.env.HIRA_PLUGINS_ROOT);
+
+  let dir = dirname(fileURLToPath(import.meta.url));
+  for (let i = 0; i < 6; i++) {
+    if (hasPluginsDir(dir)) return dir;
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  console.error(
+    'Could not find Hira plugins/. Pass --plugins-root or set HIRA_PLUGINS_ROOT.',
+  );
+  process.exit(1);
+}
+
+function hasPluginsDir(dir: string): boolean {
+  try {
+    return statSync(join(dir, 'plugins', 'agents')).isDirectory();
+  } catch {
+    return false;
+  }
+}
 
 async function renderSystemPrompt(
   agent: LoadedAgent,
