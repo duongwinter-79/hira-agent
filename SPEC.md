@@ -609,6 +609,17 @@ runs:
 - `claude login` completed once with a Pro or Max subscription.
 - Node 20+ (already required for the runtime).
 
+### Installing the CLI
+- `pnpm install && pnpm -r build` from the repo root.
+- One-time `pnpm setup` to initialise `PNPM_HOME`, then
+  `pnpm --filter @hira/cli link --global` to put `hira` on `$PATH`.
+- Plain `ln -s "$PWD/packages/cli/dist/index.js" ~/.local/bin/hira` or
+  a shell alias also work — the CLI is built as a single
+  self-contained ESM file.
+- See [`README.md`](./README.md) for the full walkthrough including
+  the `--plugins-root` / `--project` separation that lets `hira` work
+  from any cwd.
+
 ---
 
 ## 11. Milestones
