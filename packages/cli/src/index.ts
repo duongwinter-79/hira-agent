@@ -7,6 +7,8 @@ import {
   Bus,
   Executor,
   Journal,
+  MemoryStore,
+  NewMemoryRecordSchema,
   SessionDriver,
   composeSystemPrompt,
   loadBehaviouralSkills,
@@ -14,6 +16,7 @@ import {
   type Handoff,
   type LoadedAgent,
   type LoadedSkill,
+  type MemoryRecord,
   type PlannerTask,
   type TaskExecution,
 } from '@hira/runtime';
@@ -195,23 +198,44 @@ program
           return;
         }
 
+        // Query memory for context relevant to this Run, inject into each
+        // task's payload as `memory_context`. Specialists (especially
+        // Knowledge) cite by `memory:<id>` when they build on prior facts.
+        const memory = new MemoryStore(project);
+        const memoryContext = await memory.query(message, 5);
+        const tasksWithMemory: PlannerTask[] = tasks.map((t) => ({ ...t }));
+
         // Walk the task graph through wired specialists.
         const executor = new Executor({
           bus,
           journal,
           wiredOwners: WIRED_OWNERS,
           toolsOverride: SPECIALIST_READ_ONLY_TOOLS,
+          memoryContext,
         });
         const execOut = await executor.run({
           runId: run.id,
           parentHandoffId: planEnvelope.handoff_id,
-          tasks,
+          tasks: tasksWithMemory,
         });
 
         if (execOut.graph_error) {
           await fail(journal, run.id, `Planner produced an invalid task graph: ${execOut.graph_error}`);
           return;
         }
+
+        // Memory Maintainer: read the chain and extract new records.
+        // Runs before synthesis so the synthesis can announce records written.
+        const newRecords = await runMemoryMaintainer({
+          bus,
+          journal,
+          memory,
+          runId: run.id,
+          parentHandoffId: planEnvelope.handoff_id,
+          intent: message,
+          plan: planResult.response,
+          executions: execOut.executions,
+        });
 
         // Synthesis: hand back to the orchestrator with the full chain so
         // it can compose a user-facing reply.
@@ -222,7 +246,15 @@ program
           from: 'user',
           to: 'orchestrator',
           kind: 'response',
-          payload: { message: buildSynthesisPrompt(message, planResult.response, execOut.executions) },
+          payload: {
+            message: buildSynthesisPrompt(
+              message,
+              planResult.response,
+              execOut.executions,
+              memoryContext,
+              newRecords,
+            ),
+          },
           artifacts: [],
           delta_refs: [],
         };
@@ -335,6 +367,79 @@ runs
     }
   });
 
+// ---------- memory ----------
+
+const memoryCmd = program.command('memory').description('Inspect the project memory store');
+
+memoryCmd
+  .command('list')
+  .description('List memory records, newest first')
+  .option('--project <path>', 'project root', process.cwd())
+  .option('--kind <kind>', 'filter by kind (adr|outcome|convention|glossary)')
+  .option('--limit <n>', 'maximum records to show', (v) => Number.parseInt(v, 10), 20)
+  .action(async (opts: { project: string; kind?: string; limit: number }) => {
+    const store = new MemoryStore(resolve(opts.project));
+    const filters: { kind?: 'adr' | 'outcome' | 'convention' | 'glossary' } = {};
+    if (opts.kind) {
+      if (!['adr', 'outcome', 'convention', 'glossary'].includes(opts.kind)) {
+        console.error(`Unknown kind '${opts.kind}'. Use adr|outcome|convention|glossary.`);
+        process.exit(1);
+      }
+      filters.kind = opts.kind as typeof filters.kind;
+    }
+    const records = (await store.list(filters)).slice(0, opts.limit);
+    if (records.length === 0) {
+      console.log('(no memory records)');
+      return;
+    }
+    const idPad = Math.max(...records.map((r) => r.id.length));
+    for (const r of records) {
+      const tags = r.tags.length ? `[${r.tags.join(',')}]` : '';
+      const title = r.title.length > 70 ? r.title.slice(0, 67) + '...' : r.title;
+      console.log(`${r.id.padEnd(idPad)}  ${r.created_at}  ${title}  ${tags}`);
+    }
+  });
+
+memoryCmd
+  .command('show')
+  .description('Show one memory record')
+  .argument('<id>')
+  .option('--project <path>', 'project root', process.cwd())
+  .action(async (id: string, opts: { project: string }) => {
+    const store = new MemoryStore(resolve(opts.project));
+    const r = await store.get(id);
+    if (!r) {
+      console.error(`memory record not found: ${id}`);
+      process.exit(1);
+    }
+    console.log(`${r.id} (${r.kind})`);
+    console.log(`  title:   ${r.title}`);
+    console.log(`  tags:    ${r.tags.join(', ') || '—'}`);
+    console.log(`  created: ${r.created_at}`);
+    if (r.source?.run_id) console.log(`  source:  run ${r.source.run_id}`);
+    console.log();
+    console.log(r.body);
+  });
+
+memoryCmd
+  .command('query')
+  .description('Keyword query against the memory store')
+  .argument('<text>')
+  .option('--project <path>', 'project root', process.cwd())
+  .option('--limit <n>', 'maximum hits', (v) => Number.parseInt(v, 10), 5)
+  .action(async (text: string, opts: { project: string; limit: number }) => {
+    const store = new MemoryStore(resolve(opts.project));
+    const hits = await store.query(text, opts.limit);
+    if (hits.length === 0) {
+      console.log('(no matches)');
+      return;
+    }
+    for (const r of hits) {
+      const tags = r.tags.length ? `[${r.tags.join(',')}]` : '';
+      console.log(`${r.id}  ${r.title}  ${tags}`);
+    }
+  });
+
 await program.parseAsync(process.argv).catch((err: unknown) => {
   console.error(err instanceof Error ? err.message : String(err));
   process.exit(1);
@@ -439,6 +544,8 @@ function buildSynthesisPrompt(
   intent: string,
   plan: unknown,
   executions: TaskExecution[],
+  memoryContext: MemoryRecord[],
+  memoryRecordsWritten: MemoryRecord[],
 ): string {
   const taskResults = executions.map((e) => ({
     task_id: e.task.id,
@@ -453,14 +560,95 @@ function buildSynthesisPrompt(
     '',
     `original_intent: ${intent}`,
     '',
+    'memory_context (records the runtime fetched for this Run):',
+    JSON.stringify(
+      memoryContext.map((r) => ({ id: r.id, title: r.title, tags: r.tags })),
+      null,
+      2,
+    ),
+    '',
     'plan:',
     JSON.stringify(plan, null, 2),
     '',
     'task_results (in dependency order):',
     JSON.stringify(taskResults, null, 2),
     '',
+    'memory_records_written (newly persisted by the Memory Maintainer):',
+    JSON.stringify(
+      memoryRecordsWritten.map((r) => ({ id: r.id, kind: r.kind, title: r.title })),
+      null,
+      2,
+    ),
+    '',
     'Compose the user-facing reply per your synthesis rules.',
   ].join('\n');
+}
+
+async function runMemoryMaintainer(args: {
+  bus: Bus;
+  journal: Journal;
+  memory: MemoryStore;
+  runId: string;
+  parentHandoffId: string;
+  intent: string;
+  plan: unknown;
+  executions: TaskExecution[];
+}): Promise<MemoryRecord[]> {
+  const envelope: Handoff = {
+    run_id: args.runId,
+    handoff_id: randomUUID(),
+    parent_handoff_id: args.parentHandoffId,
+    from: 'orchestrator',
+    to: 'memory',
+    kind: 'request',
+    payload: {
+      original_intent: args.intent,
+      plan: args.plan,
+      task_results: args.executions.map((e) => ({
+        task_id: e.task.id,
+        owner: e.task.owner,
+        status: e.status,
+        skip_reason: e.skip_reason,
+        response: e.response,
+      })),
+    },
+    artifacts: [],
+    delta_refs: [],
+  };
+
+  const result = await args.bus.dispatch(envelope);
+  if (result.exitCode !== 0) {
+    process.stderr.write(
+      `(warning: memory maintainer exited ${result.exitCode}; no records persisted for this Run)\n`,
+    );
+    return [];
+  }
+
+  const proposed = parseMemoryRecords(result.response);
+  if (proposed.length === 0) return [];
+
+  const persisted: MemoryRecord[] = [];
+  for (const r of proposed) {
+    try {
+      const validated = NewMemoryRecordSchema.parse({
+        ...r,
+        source: { run_id: args.runId, handoff_id: envelope.handoff_id },
+      });
+      const written = await args.memory.write(validated);
+      persisted.push(written);
+    } catch (err) {
+      process.stderr.write(
+        `(warning: skipping malformed memory record: ${err instanceof Error ? err.message : String(err)})\n`,
+      );
+    }
+  }
+  return persisted;
+}
+
+function parseMemoryRecords(response: unknown): unknown[] {
+  if (!response || typeof response !== 'object') return [];
+  const raw = (response as { records?: unknown }).records;
+  return Array.isArray(raw) ? raw : [];
 }
 
 async function fail(

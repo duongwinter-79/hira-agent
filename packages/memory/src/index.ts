@@ -1,1 +1,2 @@
-export const MEMORY_BACKEND_PLACEHOLDER = 'sqlite+vector' as const;
+export * from './types.js';
+export * from './store.js';

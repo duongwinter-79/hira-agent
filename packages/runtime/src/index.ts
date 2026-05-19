@@ -66,3 +66,6 @@ export type {
   TaskExecution,
 } from './executor.js';
 export { verifyDeveloperHandoff } from './verification.js';
+
+export { MemoryStore, MemoryRecordSchema, NewMemoryRecordSchema, MemoryKindSchema } from '@hira/memory';
+export type { MemoryRecord, NewMemoryRecord, MemoryKind, MemorySource } from '@hira/memory';

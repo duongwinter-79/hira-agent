@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { Handoff, Journal } from '@hira/journal';
+import type { MemoryRecord } from '@hira/memory';
 import { type Bus, type DispatchResult } from './bus.js';
 import { type VerificationReport } from '@hira/journal';
 import { verifyDeveloperHandoff } from './verification.js';
@@ -43,6 +44,13 @@ export type ExecutorConfig = {
    * the Verification Engine lands.
    */
   toolsOverride?: string[];
+  /**
+   * Memory records (SPEC §5.8) the runtime fetched for this Run.
+   * Injected into every task's payload as `memory_context[]` so
+   * specialists — especially Knowledge — can build on prior facts and
+   * cite them by `memory:<id>`.
+   */
+  memoryContext?: MemoryRecord[];
 };
 
 export type ExecutorInput = {
@@ -111,6 +119,7 @@ export class Executor {
             owner: d.task.owner,
             response: d.response,
           })),
+          memory_context: this.cfg.memoryContext ?? [],
         },
         artifacts: [],
         delta_refs: [],
