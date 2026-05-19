@@ -123,35 +123,89 @@ pnpm install
 pnpm -r build
 ```
 
-To run the CLI without installing globally:
+That gives you a self-contained `packages/cli/dist/index.js` (the CLI
+bundles all its workspace and npm dependencies).
+
+### Run without installing globally
 
 ```sh
 node packages/cli/dist/index.js <command> ...
 ```
 
+### Install globally so `hira` works from any directory
+
+The CLI ships with a `hira` bin entry. Link it into your global
+pnpm bin directory:
+
+```sh
+# One-time pnpm setup if you have not done it before.
+# Appends PNPM_HOME + PATH lines to your shell rc; reload your shell after.
+pnpm setup
+
+# From the repo root:
+pnpm --filter @hira/cli link --global
+```
+
+Verify:
+
+```sh
+which hira          # /<your-pnpm-home>/hira
+cd /some/other/dir
+hira agents list    # finds Hira's bundled agents from the install dir
+```
+
+The CLI locates Hira's `plugins/` by walking up from its own binary
+location, so `pnpm link --global` "just works" — the symlink points
+back into your checkout. You can override with `--plugins-root <path>`
+or `HIRA_PLUGINS_ROOT=<path>` if you want to point at a different
+install.
+
+If you prefer not to use pnpm's global linker, two alternatives work
+just as well:
+
+```sh
+# Plain symlink into any directory already on $PATH:
+ln -s "$PWD/packages/cli/dist/index.js" ~/.local/bin/hira
+
+# Or a shell alias in ~/.bashrc or ~/.zshrc:
+alias hira="node /absolute/path/to/hira-agent/packages/cli/dist/index.js"
+```
+
+To upgrade after a `git pull`, just re-run `pnpm -r build` — the link
+points at `dist/index.js`, which gets refreshed in place.
+
 ---
 
 ## How to run
 
+Once linked, run from any project directory. The CLI separates two
+roots:
+
+- **Plugins root** — where Hira's agents and skills live. Auto-detected
+  from the binary's install location; override with `--plugins-root`
+  or `HIRA_PLUGINS_ROOT`.
+- **Project root** — where `.hira/runs/` is written and where spawned
+  agents operate (the `claude` cwd). Defaults to the current directory;
+  override with `--project`.
+
 ```sh
 # List the configured agents and where each can escalate.
-node packages/cli/dist/index.js agents list
+hira agents list
 
-# Send a message to the Orchestrator. It will either reply directly
-# or dispatch to the Planner (today the only specialist wired into
-# the bus).
-node packages/cli/dist/index.js run "<your message>"
+# Send a message to the Orchestrator. The journal for this Run lands
+# in <cwd>/.hira/runs/<run_id>/.
+hira run "<your message>"
 
-# Inspect the journal of a Run by id (printed after every `run`).
-node packages/cli/dist/index.js runs list
-node packages/cli/dist/index.js runs show <run_id>
+# Inspect the journal.
+hira runs list
+hira runs show <run_id>
 
 # See the assembled `claude` invocation without spawning it.
-node packages/cli/dist/index.js run --dry-run "<message>"
+hira run --dry-run "<message>"
 ```
 
-Run artefacts (per-agent isolation settings, JSONL journal) live under
-`.hira/runs/<run_id>/`.
+If you haven't linked it globally, prefix every command with
+`node packages/cli/dist/index.js`.
 
 ---
 
