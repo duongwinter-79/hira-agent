@@ -10,6 +10,7 @@ import {
   MemoryStore,
   NewMemoryRecordSchema,
   SessionDriver,
+  buildRunTrace,
   composeSystemPrompt,
   createRunWorktree,
   finalizeWorktree,
@@ -19,6 +20,7 @@ import {
   loadVerificationConfig,
   loadWorktreeSetupCommand,
   runWorktreeSetup,
+  traceArtifact,
   type Handoff,
   type LoadedAgent,
   type LoadedSkill,
@@ -420,6 +422,100 @@ runs
     }
   });
 
+runs
+  .command('trace')
+  .description('Trace a Run or artifact: requirement ↔ task ↔ artifact, both directions')
+  .argument('<id>', 'a run id (or prefix), or an artifact id (kind:run:seq)')
+  .option('--project <path>', 'project root', process.cwd())
+  .action(async (id: string, opts: { project: string }) => {
+    const journal = new Journal(resolve(opts.project));
+    const runs = await journal.listRuns(500);
+
+    // An artifact id is `<kind>:<run_short>:<seq>` — three colon-separated parts.
+    const parts = id.split(':');
+    const isArtifactId = parts.length === 3;
+
+    const runShort = isArtifactId ? parts[1]! : id;
+    const run =
+      runs.find((r) => r.id === runShort) ?? runs.find((r) => r.id.startsWith(runShort));
+    if (!run) {
+      console.error(
+        isArtifactId
+          ? `no Run found for artifact '${id}' (prefix '${runShort}')`
+          : `run not found: ${id}`,
+      );
+      process.exit(1);
+    }
+
+    const data = await journal.getRun(run.id);
+    if (!data) {
+      console.error(`run not found: ${run.id}`);
+      process.exit(1);
+    }
+    const trace = buildRunTrace(data.run, data.handoffs, data.artifacts);
+
+    if (isArtifactId) {
+      const at = traceArtifact(trace, id);
+      if (!at) {
+        console.error(`artifact not found in Run ${run.id}: ${id}`);
+        process.exit(1);
+      }
+      console.log(`Trace — artifact ${at.artifact.id}`);
+      console.log(`  kind: ${at.artifact.kind}   run: ${run.id}`);
+      if (at.task) {
+        console.log(`  produced by: task ${at.task.id} (${at.task.owner})`);
+      }
+      console.log();
+      console.log('Backward — requirements that led here:');
+      console.log(`  intent: ${trace.run.intent_message}`);
+      for (const t of at.ancestors) {
+        console.log(`   → ${t.id} ${t.owner}  [${t.status}]`);
+      }
+      if (at.task) console.log(`   → ${at.task.id} ${at.task.owner}  ← produced ${at.artifact.id}`);
+      console.log();
+      console.log('Forward — work that consumed it:');
+      if (at.descendants.length === 0) {
+        console.log('  (nothing depended on this task)');
+      } else {
+        for (const t of at.descendants) {
+          console.log(`   → ${t.id} ${t.owner}  [${t.status}]`);
+        }
+      }
+      console.log();
+      console.log('Payload:');
+      console.log(`  ${summariseArtifactPayload(at.artifact.payload)}`);
+      return;
+    }
+
+    // Run trace.
+    console.log(`Trace — Run ${trace.run.id}`);
+    console.log(`  intent: ${trace.run.intent_message}`);
+    console.log(`  status: ${trace.run.status}`);
+    console.log();
+    if (trace.framing.length > 0) {
+      const framing = trace.framing
+        .map((f) => `${f.from}→${f.to}(${f.status})`)
+        .join('  ');
+      console.log(`Framing: ${framing}`);
+      console.log();
+    }
+    if (trace.tasks.length === 0) {
+      console.log('(no task graph — this Run was answered directly by the Orchestrator)');
+      return;
+    }
+    console.log('Task chain (Planner graph, dependency order):');
+    for (const t of trace.tasks) {
+      const deps = t.depends_on.length ? t.depends_on.join(',') : '—';
+      const attempts = t.attempts ? `  attempts:${t.attempts}` : '';
+      console.log(
+        `  ${t.id}  ${t.owner.padEnd(18)} deps:${deps.padEnd(10)} [${t.status}]${attempts}`,
+      );
+      for (const a of t.artifacts) {
+        console.log(`       ◆ ${a.id}  ${summariseArtifactPayload(a.payload)}`);
+      }
+    }
+  });
+
 // ---------- memory ----------
 
 const memoryCmd = program.command('memory').description('Inspect the project memory store');
@@ -545,6 +641,25 @@ async function renderSystemPrompt(
 ): Promise<string> {
   const behavioural = await loadBehaviouralSkills(skills, agent.manifest.skills);
   return composeSystemPrompt(agent.systemPrompt, behavioural);
+}
+
+/** One-line summary of an artifact's payload for the trace view. */
+function summariseArtifactPayload(payload: unknown): string {
+  if (!payload || typeof payload !== 'object') return String(payload ?? '');
+  const status = (payload as { status?: unknown }).status;
+  const stages = (payload as { stages?: unknown }).stages;
+  if (typeof status === 'string' && Array.isArray(stages)) {
+    const parts = stages
+      .map((s) => {
+        const st = s as { name?: unknown; status?: unknown };
+        return typeof st.name === 'string' ? `${st.name}:${String(st.status)}` : null;
+      })
+      .filter((s): s is string => s !== null);
+    return `${status}  (${parts.join(', ')})`;
+  }
+  if (typeof status === 'string') return status;
+  const json = JSON.stringify(payload);
+  return json.length > 80 ? json.slice(0, 77) + '...' : json;
 }
 
 type OrchestratorDecision =

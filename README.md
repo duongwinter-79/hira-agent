@@ -200,6 +200,14 @@ hira run "<your message>"
 hira runs list
 hira runs show <run_id>
 
+# Trace a Run or an artifact, both directions (requirement ↔ task ↔ artifact).
+hira runs trace <run_id>
+hira runs trace <artifact_id>      # e.g. verification:1a2b3c4d:1
+
+# Inspect the cross-Run memory store.
+hira memory list
+hira memory query "<keywords>"
+
 # See the assembled `claude` invocation without spawning it.
 hira run --dry-run "<message>"
 ```
