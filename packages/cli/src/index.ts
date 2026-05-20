@@ -108,6 +108,7 @@ program
     ) => {
       const project = resolve(opts.project);
       const pluginsRoot = resolvePluginsRoot(opts.pluginsRoot);
+      const mcpSkillsServer = resolveMcpSkillsServer(pluginsRoot);
       const { agents, skills } = await loadPlugins(pluginsRoot);
       const orchestrator = agents.find(
         (a: LoadedAgent) => a.manifest.name === 'orchestrator',
@@ -147,6 +148,7 @@ program
         projectRoot: project,
         driver,
         binary: opts.binary,
+        ...(mcpSkillsServer ? { mcpSkillsServerPath: mcpSkillsServer } : {}),
       });
 
       try {
@@ -560,9 +562,20 @@ runs
         }
       }
 
-      const { agents, skills } = await loadPlugins(resolvePluginsRoot(opts.pluginsRoot));
+      const pluginsRoot = resolvePluginsRoot(opts.pluginsRoot);
+      const { agents, skills } = await loadPlugins(pluginsRoot);
       const driver = new SessionDriver();
-      const bus = new Bus({ agents, skills, journal, projectRoot: project, driver, binary: opts.binary });
+      const bus = new Bus({
+        agents,
+        skills,
+        journal,
+        projectRoot: project,
+        driver,
+        binary: opts.binary,
+        ...(resolveMcpSkillsServer(pluginsRoot)
+          ? { mcpSkillsServerPath: resolveMcpSkillsServer(pluginsRoot) }
+          : {}),
+      });
 
       process.stderr.write(
         `(resume: ${run.id} — ${tasks.length} task(s), ${priorResults.size} reusable)\n`,
@@ -700,6 +713,21 @@ function hasPluginsDir(dir: string): boolean {
     return statSync(join(dir, 'plugins', 'agents')).isDirectory();
   } catch {
     return false;
+  }
+}
+
+/**
+ * Locate the built `@hira/mcp-skills` server inside the Hira install.
+ * Returns undefined when it's not built — MCP skills then degrade to
+ * silently inert (the runtime consistency gate still runs regardless).
+ */
+function resolveMcpSkillsServer(pluginsRoot: string): string | undefined {
+  const serverPath = join(pluginsRoot, 'packages', 'mcp-skills', 'dist', 'server.js');
+  try {
+    statSync(serverPath);
+    return serverPath;
+  } catch {
+    return undefined;
   }
 }
 

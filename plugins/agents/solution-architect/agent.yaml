@@ -2,6 +2,8 @@ name: solution-architect
 version: 0.0.1
 kind: agent
 prompt: ./system.md
+skills:
+  - spec-consistency
 tools:
   - Read
   - Grep

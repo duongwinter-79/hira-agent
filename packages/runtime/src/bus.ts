@@ -9,6 +9,7 @@ import {
   isSystemInit,
   loadBehaviouralSkills,
   prepareAgentIsolation,
+  resolveMcpSkills,
   type SessionInvocation,
   type SessionResult,
   type StreamEvent,
@@ -37,7 +38,17 @@ export type BusConfig = {
   projectRoot: string;
   driver: BusDriver;
   binary: string;
+  /**
+   * Path to the built `@hira/mcp-skills` server (`dist/server.js`). When
+   * set, agents whose skill allowlist includes an MCP skill get the
+   * `hira-skills` MCP server mounted via `--mcp-config` (SPEC §4.6).
+   * Undefined → MCP skills are silently inert.
+   */
+  mcpSkillsServerPath?: string;
 };
+
+/** Name of Hira's built-in MCP server, as it appears in mcp.json. */
+const HIRA_MCP_SERVER = 'hira-skills';
 
 export type DispatchResult = {
   /** Parsed fenced JSON from the agent's reply, or null if none found / malformed. */
@@ -96,14 +107,33 @@ export class Bus {
     const behavioural = await loadBehaviouralSkills(this.cfg.skills, target.manifest.skills);
     const systemPrompt = composeSystemPrompt(target.systemPrompt, behavioural);
 
-    const allowedTools = options.tools ?? target.manifest.tools;
+    const baseTools = options.tools ?? target.manifest.tools;
     const cwd = options.cwd ?? this.cfg.projectRoot;
+
+    // Mount Hira's MCP server when the agent's allowlist includes an MCP
+    // skill (SPEC §4.6). The tool names go into the allowlist so the
+    // headless agent can call them without a permission prompt.
+    const mcpSkills = this.cfg.mcpSkillsServerPath
+      ? resolveMcpSkills(this.cfg.skills, target.manifest.skills)
+      : [];
+    const mcpToolNames = mcpSkills.map((s) => `mcp__${HIRA_MCP_SERVER}__${s.tool}`);
+    const allowedTools = mcpToolNames.length > 0 ? [...baseTools, ...mcpToolNames] : baseTools;
 
     const runDir = this.cfg.journal.runDir(envelope.run_id);
     const isolation = await prepareAgentIsolation({
       runDir,
       agentName: target.manifest.name,
       allowedTools,
+      ...(mcpSkills.length > 0 && this.cfg.mcpSkillsServerPath
+        ? {
+            mcpServer: {
+              name: HIRA_MCP_SERVER,
+              command: 'node',
+              args: [this.cfg.mcpSkillsServerPath],
+              env: { HIRA_PROJECT_ROOT: this.cfg.projectRoot },
+            },
+          }
+        : {}),
     });
 
     await this.cfg.journal.recordHandoffStart(envelope);
@@ -135,6 +165,7 @@ export class Bus {
         outputFormat: 'stream-json',
         settingSources: [],
         settingsPath: isolation.settingsPath,
+        ...(isolation.mcpConfigPath ? { mcpConfig: [isolation.mcpConfigPath] } : {}),
       },
       onEvent,
     );

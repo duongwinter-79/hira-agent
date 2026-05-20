@@ -7,7 +7,11 @@ import type { LoadedAgent, LoadedSkill } from '@hira/plugin-loader';
 import type { SessionInvocation, SessionResult, StreamEvent } from '@hira/session';
 import { Bus, type BusDriver } from './bus.js';
 
-function agent(name: string, escalates_to: string[] = []): LoadedAgent {
+function agent(
+  name: string,
+  escalates_to: string[] = [],
+  skills: string[] = [],
+): LoadedAgent {
   return {
     dir: '/fake/' + name,
     systemPrompt: `You are ${name}.`,
@@ -16,7 +20,7 @@ function agent(name: string, escalates_to: string[] = []): LoadedAgent {
       version: '0.0.1',
       kind: 'agent',
       prompt: './system.md',
-      skills: [],
+      skills,
       tools: [],
       escalates_to,
       budgets: { max_turns: 40, max_tokens: 200_000 },
@@ -31,6 +35,7 @@ function makeBus(opts: {
   driver: BusDriver;
   journal: Journal;
   projectRoot: string;
+  mcpSkillsServerPath?: string;
 }): Bus {
   return new Bus({
     agents: opts.agents,
@@ -39,6 +44,7 @@ function makeBus(opts: {
     projectRoot: opts.projectRoot,
     driver: opts.driver,
     binary: 'claude',
+    ...(opts.mcpSkillsServerPath ? { mcpSkillsServerPath: opts.mcpSkillsServerPath } : {}),
   });
 }
 
@@ -208,6 +214,78 @@ describe('Bus.dispatch', () => {
     expect(progress!.map((p) => p.phase)).toEqual(['started', 'tool', 'message']);
     expect(progress!.find((p) => p.phase === 'tool')!.detail).toBe('Read');
     expect(progress!.find((p) => p.phase === 'started')!.detail).toBe('sess-9');
+  });
+
+  it('mounts the MCP server for an agent with an MCP skill', async () => {
+    const projectRoot = await mkdtemp(join(tmpdir(), 'hira-bus-'));
+    const journal = new Journal(projectRoot);
+    const run = await journal.openRun('test');
+
+    let captured: { allowedTools?: string[]; mcpConfig?: string[] } = {};
+    const driver: BusDriver = {
+      async run(invocation) {
+        captured = { allowedTools: invocation.allowedTools, mcpConfig: invocation.mcpConfig };
+        return { text: '```json\n{}\n```', sessionId: 's', events: [], exitCode: 0, stderr: '' };
+      },
+    };
+
+    const specSkill: LoadedSkill = {
+      dir: '/fake/spec-consistency',
+      manifest: {
+        name: 'spec-consistency',
+        version: '1.0.0',
+        kind: 'skill',
+        mcp: { tool: 'spec_consistency_check' },
+      },
+    };
+
+    const bus = makeBus({
+      agents: [agent('planner', [], ['spec-consistency'])],
+      skills: [specSkill],
+      driver,
+      journal,
+      projectRoot,
+      mcpSkillsServerPath: '/install/mcp-skills/dist/server.js',
+    });
+
+    await bus.dispatch(makeHandoff('orchestrator', 'planner', run.id));
+
+    expect(captured.mcpConfig).toHaveLength(1);
+    expect(captured.allowedTools).toContain('mcp__hira-skills__spec_consistency_check');
+  });
+
+  it('does not mount the MCP server when no server path is configured', async () => {
+    const projectRoot = await mkdtemp(join(tmpdir(), 'hira-bus-'));
+    const journal = new Journal(projectRoot);
+    const run = await journal.openRun('test');
+
+    let captured: { mcpConfig?: string[] } = {};
+    const driver: BusDriver = {
+      async run(invocation) {
+        captured = { mcpConfig: invocation.mcpConfig };
+        return { text: '```json\n{}\n```', sessionId: 's', events: [], exitCode: 0, stderr: '' };
+      },
+    };
+    const specSkill: LoadedSkill = {
+      dir: '/fake/spec-consistency',
+      manifest: {
+        name: 'spec-consistency',
+        version: '1.0.0',
+        kind: 'skill',
+        mcp: { tool: 'spec_consistency_check' },
+      },
+    };
+    // mcpSkillsServerPath intentionally omitted.
+    const bus = makeBus({
+      agents: [agent('planner', [], ['spec-consistency'])],
+      skills: [specSkill],
+      driver,
+      journal,
+      projectRoot,
+    });
+
+    await bus.dispatch(makeHandoff('orchestrator', 'planner', run.id));
+    expect(captured.mcpConfig).toBeUndefined();
   });
 
   it('honours an options.tools override on the dispatched invocation', async () => {

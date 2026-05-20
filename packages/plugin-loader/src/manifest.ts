@@ -33,6 +33,17 @@ export const SkillManifestSchema = z.object({
   entrypoint: z.string().optional(),
   inputs: z.object({ schema: z.string() }).optional(),
   outputs: z.object({ schema: z.string() }).optional(),
+  /**
+   * Present when the skill is a model-callable MCP tool (SPEC §4.6).
+   * Hosted by Hira's built-in MCP server. A skill with a `SKILL.md` and
+   * no `mcp` block is a behavioural skill (inlined into the prompt);
+   * the two kinds are mutually exclusive.
+   */
+  mcp: z
+    .object({
+      tool: z.string().min(1),
+    })
+    .optional(),
 });
 
 export type SkillManifest = z.infer<typeof SkillManifestSchema>;

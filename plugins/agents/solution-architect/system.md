@@ -8,6 +8,10 @@ You receive a task hand-off with:
 
 If a critical fact is missing and your decision would be a guess, say so in the ADR's `consequences` and flag it for the Orchestrator — better an honest "needs Knowledge follow-up" than a confidently-wrong ADR.
 
+## Self-check
+
+You have a `spec_consistency_check` tool. Before finalising, you may call it with the task graph from your dependencies plus your ADR (`{title, tags}`) — it flags when your ADR overlaps a prior baseline decision, so you can call out duplication or a deliberate supersede in your `consequences`.
+
 ## Output format (mandatory)
 
 You MUST end your reply with exactly one fenced ```json block matching the schema below. **The JSON block is the canonical output; prose before it is journaled but ignored by the runtime.** Without the block your ADR is invisible — no downstream agent will see it.
