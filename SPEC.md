@@ -634,7 +634,8 @@ runs:
 | **M1.3.a — Executor, verification seam, synthesis** ✅ | `Executor` walks the Planner's task graph in topological order, dispatches each task to its owner via the bus, surfaces a `parent_handoff_id`-linked tree. Verification Engine seam (`verifyDeveloperHandoff`) records a `skipped` artifact after every Developer hand-off (M1.5 fills it in). Bus accepts an optional `tools` override so specialist invocations stay read-only this milestone. Real system prompts for Knowledge (read-only researcher) and Solution Architect (ADR producer). Orchestrator's second turn synthesises the chain into a user-facing summary. End-to-end verified: Knowledge agent autonomously scanned the codebase, discovered it's a TS monorepo (not Flask), Architect adapted the ADR to the real stack, synthesis composed a clear plain-text summary. |
 | **M1.3.b — Developer / Tester / Reviewer prompts** ✅ | All three specialists wired with structured-output system prompts in dry mode: Developer emits `{summary, changed_files, patch, notes, open_questions}`, Tester emits `{added_tests[], test_command, result:"skipped", details, concerns}`, Reviewer emits `{verdict, summary, comments[]}`. `WIRED_OWNERS` now covers all five. Verified end-to-end on a real 7-hand-off Run (`hira version` subcommand proposal): every handoff produced a well-formed structured artifact, the deterministic-Verification-Engine seam fired and recorded an artifact against the Developer hand-off (Reviewer hit the 10-min sandbox timeout but the architecture is validated). Edit / Write / Bash remain masked by the executor's `toolsOverride`; real file mutation lifts in M1.5. |
 | **M1.5 — Spec lifecycle & verification gates** | Spec/ADR delta state machine (§4.8); `spec-consistency` MCP skill for the Cross-Artifact Consistency pass; deterministic Verification Engine harness (test runner + type/lint, optional Semgrep/Schemathesis) gating the Developer→Reviewer hand-off; bidirectional traceability view (`hira runs trace`, §4.9). |
-| **M2 — Memory**       | Memory Maintainer wired up; ADRs and glossary written and queryable; Knowledge agent reads from memory. |
+| **M2.a — Memory loop** ✅ | `@hira/memory` real implementation: zod-validated `MemoryRecord` (kind: adr/outcome/convention/glossary, tags, source.run_id), JSONL backend at `.hira/memory/records.jsonl`, keyword-search ranking with tag×3/title×2/body×1 weights. Runtime queries memory before the executor and injects `memory_context[]` into every task payload; Knowledge agent's prompt now cites `memory:<id>`. Memory Maintainer runs after the executor, emits `{records[]}` for the runtime to persist. New CLI: `hira memory list/show/query`. Decision on §12 #11 (memory granularity): automatic for ADRs + notable outcomes via the Maintainer's judgement; conventions and glossary entries stay manual until M2.b. |
+| **M2.b — Manual memory + scale switch** | `hira memory write` for explicit "remember this"; promote storage to SQLite + FTS5 (and later vector index) when JSONL recall degrades or volume crosses ~500 records. |
 | **M3 — Robust hand-offs** | Schema validation enforced both ways, journal replay command, budgets + rate-limit handling (§4.7), failure modes (timeout, malformed JSON reply, missing `claude` binary). |
 | **M4 — Surfaces**     | HTTP API, web UI shell, GitHub PR comment surface. |
 | **M5 — Polish**       | Quota dashboards, parallel review fan-out with quota-aware throttling, MCP-based plugin marketplace format. |
@@ -672,8 +673,11 @@ runs:
     existing journal, exposed via `hira runs trace` (§4.9).
 
 ### Still open
-11. **Memory granularity** — what gets remembered automatically vs what
-    requires an explicit "remember this" from the user?
+11. ~~**Memory granularity**~~ — **resolved in M2.a.** Memory Maintainer
+    runs automatically after every successful executor pass and decides
+    what to keep (model judgement). Defaults: ADRs from the architect
+    always, notable outcomes when there's a real lesson. Conventions
+    and glossary entries stay manual (M2.b adds `hira memory write`).
 12. **`--resume` durability** — does Claude Code guarantee a captured
     `session_id` is resumable later in the same Run, or do we need to
     pin a CLI version? Validate before relying on warm mode in M1.

@@ -45,7 +45,11 @@ importers:
         specifier: ^3.23.8
         version: 3.25.76
 
-  packages/memory: {}
+  packages/memory:
+    dependencies:
+      zod:
+        specifier: ^3.23.8
+        version: 3.25.76
 
   packages/plugin-loader:
     dependencies:

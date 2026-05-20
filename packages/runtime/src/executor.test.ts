@@ -216,6 +216,47 @@ describe('Executor', () => {
     expect(out.graph_error).toMatch(/unknown task 'ghost'/);
   });
 
+  it('injects memoryContext into every task payload', async () => {
+    const { journal, runId, projectRoot } = await newRun();
+    const { driver, calls } = recordingDriver({
+      knowledge: '```json\n{}\n```',
+    });
+    const bus = new Bus({
+      agents: [agent('knowledge')],
+      skills: [],
+      journal,
+      projectRoot,
+      driver,
+      binary: 'claude',
+    });
+    const memoryContext = [
+      {
+        id: 'adr:1',
+        kind: 'adr' as const,
+        title: 'Use sqlite',
+        body: 'Decision body',
+        tags: ['storage'],
+        created_at: '2026-05-01T00:00:00Z',
+        updated_at: '2026-05-01T00:00:00Z',
+      },
+    ];
+    const exec = new Executor({
+      bus,
+      journal,
+      wiredOwners: new Set(['knowledge']),
+      memoryContext,
+    });
+    await exec.run({
+      runId,
+      parentHandoffId: 'p',
+      tasks: [{ id: 't1', description: 'x', owner: 'knowledge', depends_on: [] }],
+    });
+    const promptText = calls[0]!.invocation.prompt;
+    expect(promptText).toContain('memory_context');
+    expect(promptText).toContain('adr:1');
+    expect(promptText).toContain('Use sqlite');
+  });
+
   it('records a verification artifact after a successful Developer task (no-op seam)', async () => {
     const { journal, runId, projectRoot } = await newRun();
     const { driver } = recordingDriver({
