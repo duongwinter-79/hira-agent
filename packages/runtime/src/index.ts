@@ -76,5 +76,14 @@ export type {
   VerificationEngineOptions,
 } from './verification.js';
 
+export {
+  isGitRepo,
+  createRunWorktree,
+  runWorktreeSetup,
+  finalizeWorktree,
+  loadWorktreeSetupCommand,
+} from './worktree.js';
+export type { RunWorktree, WorktreeOutcome } from './worktree.js';
+
 export { MemoryStore, MemoryRecordSchema, NewMemoryRecordSchema, MemoryKindSchema } from '@hira/memory';
 export type { MemoryRecord, NewMemoryRecord, MemoryKind, MemorySource } from '@hira/memory';

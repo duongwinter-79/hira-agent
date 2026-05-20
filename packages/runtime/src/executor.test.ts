@@ -335,6 +335,112 @@ describe('Executor', () => {
       'red:fail',
     ]);
   });
+
+  it('retries the Developer once when verification fails', async () => {
+    const { journal, runId, projectRoot } = await newRun();
+    const { driver, calls } = recordingDriver({
+      developer: '```json\n{"summary":"impl"}\n```',
+    });
+    const bus = new Bus({
+      agents: [agent('developer')],
+      skills: [],
+      journal,
+      projectRoot,
+      driver,
+      binary: 'claude',
+    });
+    const exec = new Executor({
+      bus,
+      journal,
+      projectRoot,
+      wiredOwners: new Set(['developer']),
+      verificationConfig: { checks: [{ name: 'always-red', command: 'exit 1' }] },
+    });
+
+    const out = await exec.run({
+      runId,
+      parentHandoffId: 'p',
+      tasks: [{ id: 't1', description: 'implement', owner: 'developer', depends_on: [] }],
+    });
+
+    // Developer dispatched twice: initial attempt + one retry.
+    expect(calls.filter((c) => c.invocation.systemPrompt?.includes('developer'))).toHaveLength(2);
+    expect(out.executions[0]!.attempts).toBe(2);
+    expect(out.executions[0]!.verification?.status).toBe('fail');
+  });
+
+  it('hard-gates downstream tasks when verification keeps failing', async () => {
+    const { journal, runId, projectRoot } = await newRun();
+    const { driver } = recordingDriver({
+      developer: '```json\n{"summary":"impl"}\n```',
+      reviewer: '```json\n{"verdict":"approve"}\n```',
+    });
+    const bus = new Bus({
+      agents: [agent('developer'), agent('reviewer')],
+      skills: [],
+      journal,
+      projectRoot,
+      driver,
+      binary: 'claude',
+    });
+    const exec = new Executor({
+      bus,
+      journal,
+      projectRoot,
+      wiredOwners: new Set(['developer', 'reviewer']),
+      verificationConfig: { checks: [{ name: 'always-red', command: 'exit 1' }] },
+    });
+
+    const out = await exec.run({
+      runId,
+      parentHandoffId: 'p',
+      tasks: [
+        { id: 't1', description: 'implement', owner: 'developer', depends_on: [] },
+        { id: 't2', description: 'review', owner: 'reviewer', depends_on: ['t1'] },
+      ],
+    });
+
+    expect(out.gate_failed).toBe(true);
+    const reviewerExec = out.executions.find((e) => e.task.id === 't2');
+    expect(reviewerExec!.status).toBe('skipped');
+    expect(reviewerExec!.skip_reason).toMatch(/Verification Engine gate failed/);
+  });
+
+  it('runs downstream tasks normally when verification passes', async () => {
+    const { journal, runId, projectRoot } = await newRun();
+    const { driver } = recordingDriver({
+      developer: '```json\n{"summary":"impl"}\n```',
+      reviewer: '```json\n{"verdict":"approve"}\n```',
+    });
+    const bus = new Bus({
+      agents: [agent('developer'), agent('reviewer')],
+      skills: [],
+      journal,
+      projectRoot,
+      driver,
+      binary: 'claude',
+    });
+    const exec = new Executor({
+      bus,
+      journal,
+      projectRoot,
+      wiredOwners: new Set(['developer', 'reviewer']),
+      verificationConfig: { checks: [{ name: 'always-green', command: 'exit 0' }] },
+    });
+
+    const out = await exec.run({
+      runId,
+      parentHandoffId: 'p',
+      tasks: [
+        { id: 't1', description: 'implement', owner: 'developer', depends_on: [] },
+        { id: 't2', description: 'review', owner: 'reviewer', depends_on: ['t1'] },
+      ],
+    });
+
+    expect(out.gate_failed).toBeUndefined();
+    expect(out.executions[0]!.attempts).toBe(1);
+    expect(out.executions.find((e) => e.task.id === 't2')!.status).toBe('completed');
+  });
 });
 
 // Silence unused-import lint when no helper happens to use Handoff directly.

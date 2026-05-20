@@ -11,15 +11,22 @@ import {
   NewMemoryRecordSchema,
   SessionDriver,
   composeSystemPrompt,
+  createRunWorktree,
+  finalizeWorktree,
+  isGitRepo,
   loadBehaviouralSkills,
   loadPlugins,
   loadVerificationConfig,
+  loadWorktreeSetupCommand,
+  runWorktreeSetup,
   type Handoff,
   type LoadedAgent,
   type LoadedSkill,
   type MemoryRecord,
   type PlannerTask,
+  type RunWorktree,
   type TaskExecution,
+  type WorktreeOutcome,
 } from '@hira/runtime';
 
 /** Specialist agents wired with real system prompts in this milestone. */
@@ -127,6 +134,10 @@ program
         binary: opts.binary,
       });
 
+      // Declared outside the try so the catch can clean up a worktree
+      // left behind by a crash mid-Run.
+      let worktree: RunWorktree | undefined;
+
       try {
         // Hand-off 1: user → orchestrator (intent classification).
         const orcEnvelope: Handoff = {
@@ -210,6 +221,23 @@ program
         // Absent hira.config.json → engine reports `skipped`.
         const verificationConfig = await loadVerificationConfig(project);
 
+        // If the plan implements code, create an isolated git worktree so
+        // the Developer edits for real without touching the main checkout
+        // (SPEC §4.8). Non-git projects degrade to read-only dry mode.
+        if (tasks.some((t) => t.owner === 'developer') && (await isGitRepo(project))) {
+          worktree = await createRunWorktree(project, run.id);
+          process.stderr.write(`(worktree: ${worktree.branch})\n`);
+          const setupCmd = await loadWorktreeSetupCommand(project);
+          if (setupCmd) {
+            const setup = await runWorktreeSetup(worktree.path, setupCmd);
+            if (!setup.ok) {
+              process.stderr.write(
+                `(warning: worktree setup '${setupCmd}' failed; verification may not run)\n`,
+              );
+            }
+          }
+        }
+
         // Walk the task graph through wired specialists.
         const executor = new Executor({
           bus,
@@ -219,6 +247,7 @@ program
           toolsOverride: SPECIALIST_READ_ONLY_TOOLS,
           memoryContext,
           verificationConfig,
+          ...(worktree ? { worktree: { path: worktree.path } } : {}),
         });
         const execOut = await executor.run({
           runId: run.id,
@@ -227,8 +256,23 @@ program
         });
 
         if (execOut.graph_error) {
+          if (worktree) await finalizeWorktree(project, worktree).catch(() => undefined);
           await fail(journal, run.id, `Planner produced an invalid task graph: ${execOut.graph_error}`);
           return;
+        }
+
+        // Commit the Developer's worktree changes to its branch and remove
+        // the worktree directory. The branch persists for inspection.
+        let worktreeOutcome: WorktreeOutcome | undefined;
+        if (worktree) {
+          worktreeOutcome = await finalizeWorktree(project, worktree);
+          if (worktreeOutcome.committed) {
+            process.stderr.write(
+              `(worktree: ${worktreeOutcome.changedFiles} file(s) committed to ${worktreeOutcome.branch})\n`,
+            );
+          } else {
+            process.stderr.write(`(worktree: no file changes on ${worktreeOutcome.branch})\n`);
+          }
         }
 
         // Memory Maintainer: read the chain and extract new records.
@@ -260,6 +304,7 @@ program
               execOut.executions,
               memoryContext,
               newRecords,
+              { gateFailed: execOut.gate_failed ?? false, worktree: worktreeOutcome },
             ),
           },
           artifacts: [],
@@ -291,6 +336,7 @@ program
         await journal.closeRun(run.id, 'succeeded');
         console.error(`(run_id: ${run.id})`);
       } catch (err) {
+        if (worktree) await finalizeWorktree(project, worktree).catch(() => undefined);
         await journal.closeRun(run.id, 'failed').catch(() => undefined);
         throw err;
       }
@@ -553,12 +599,14 @@ function buildSynthesisPrompt(
   executions: TaskExecution[],
   memoryContext: MemoryRecord[],
   memoryRecordsWritten: MemoryRecord[],
+  gate: { gateFailed: boolean; worktree?: WorktreeOutcome },
 ): string {
   const taskResults = executions.map((e) => ({
     task_id: e.task.id,
     owner: e.task.owner,
     status: e.status,
     skip_reason: e.skip_reason,
+    attempts: e.attempts,
     response: e.response,
     verification: e.verification,
   }));
@@ -579,6 +627,18 @@ function buildSynthesisPrompt(
     '',
     'task_results (in dependency order):',
     JSON.stringify(taskResults, null, 2),
+    '',
+    'verification_gate:',
+    JSON.stringify(
+      {
+        gate_failed: gate.gateFailed,
+        worktree_branch: gate.worktree?.branch ?? null,
+        worktree_committed: gate.worktree?.committed ?? false,
+        worktree_changed_files: gate.worktree?.changedFiles ?? 0,
+      },
+      null,
+      2,
+    ),
     '',
     'memory_records_written (newly persisted by the Memory Maintainer):',
     JSON.stringify(
