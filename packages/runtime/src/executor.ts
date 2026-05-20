@@ -32,6 +32,8 @@ export type TaskExecution = {
   response_text?: string;
   /** Number of times the task was dispatched (>1 means the Developer retried). */
   attempts?: number;
+  /** True when the result was reused from a prior Run (resume — SPEC M1.4). */
+  resumed?: boolean;
   /** Verification report from the deterministic engine, after a Developer task. */
   verification?: VerificationReport;
 };
@@ -84,6 +86,13 @@ export type ExecutorConfig = {
   knownOwners?: Set<string>;
   /** Baseline `adr`-kind memory records, for the consistency gate's duplication check. */
   baselineAdrs?: BaselineAdr[];
+  /**
+   * Results reused from a prior Run (resume — SPEC M1.4). When a task's id
+   * is present, the Executor reuses the result instead of dispatching.
+   * The CLI only populates this with self-contained owners (Knowledge,
+   * Solution Architect) — worktree-touching tasks always re-run.
+   */
+  priorResults?: ReadonlyMap<string, { response: unknown; responseText: string }>;
 };
 
 export type ExecutorInput = {
@@ -152,6 +161,18 @@ export class Executor {
       }
       if (!this.cfg.wiredOwners.has(task.owner)) {
         exec.skip_reason = `owner '${task.owner}' is not wired in this milestone`;
+        executions.push(exec);
+        continue;
+      }
+
+      // Resume (SPEC M1.4): reuse a result carried over from a prior Run
+      // instead of dispatching again.
+      const prior = this.cfg.priorResults?.get(task.id);
+      if (prior) {
+        exec.status = 'completed';
+        exec.response = prior.response;
+        exec.response_text = prior.responseText;
+        exec.resumed = true;
         executions.push(exec);
         continue;
       }

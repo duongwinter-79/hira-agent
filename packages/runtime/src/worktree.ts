@@ -49,7 +49,10 @@ export async function isGitRepo(projectRoot: string): Promise<boolean> {
 
 /**
  * Create a worktree for a Run, branched from the current HEAD.
- * Throws if `git worktree add` fails (caller should have checked isGitRepo).
+ *
+ * Idempotent: any stale worktree / branch left by a previous (crashed)
+ * attempt at the same run id is cleaned up first, so this is safe to call
+ * on resume (SPEC M1.4). Throws if `git worktree add` then fails.
  */
 export async function createRunWorktree(
   projectRoot: string,
@@ -57,6 +60,12 @@ export async function createRunWorktree(
 ): Promise<RunWorktree> {
   const branch = `hira/run-${runId.slice(0, 8)}`;
   const path = join(projectRoot, '.hira', 'runs', runId, 'worktree');
+
+  // Best-effort cleanup of a stale worktree/branch from a crashed attempt.
+  await git(['worktree', 'remove', '--force', path], projectRoot);
+  await git(['worktree', 'prune'], projectRoot);
+  await git(['branch', '-D', branch], projectRoot);
+
   const r = await git(['worktree', 'add', '-b', branch, path, 'HEAD'], projectRoot);
   if (r.code !== 0) {
     throw new Error(`git worktree add failed: ${r.stderr.trim() || r.stdout.trim()}`);

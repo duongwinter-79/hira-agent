@@ -477,6 +477,48 @@ describe('Executor', () => {
     expect(devExec!.skip_reason).toMatch(/Consistency gate blocked/);
   });
 
+  it('reuses prior results on resume instead of dispatching them', async () => {
+    const { journal, runId, projectRoot } = await newRun();
+    const { driver, calls } = recordingDriver({
+      developer: '```json\n{"summary":"impl"}\n```',
+    });
+    const bus = new Bus({
+      agents: [agent('knowledge'), agent('developer')],
+      skills: [],
+      journal,
+      projectRoot,
+      driver,
+      binary: 'claude',
+    });
+    const exec = new Executor({
+      bus,
+      journal,
+      projectRoot,
+      wiredOwners: new Set(['knowledge', 'developer']),
+      priorResults: new Map([
+        ['t1', { response: { summary: 'cached research' }, responseText: 'cached' }],
+      ]),
+    });
+
+    const out = await exec.run({
+      runId,
+      parentHandoffId: 'p',
+      tasks: [
+        { id: 't1', description: 'research', owner: 'knowledge', depends_on: [] },
+        { id: 't2', description: 'build', owner: 'developer', depends_on: ['t1'] },
+      ],
+    });
+
+    const t1 = out.executions.find((e) => e.task.id === 't1')!;
+    expect(t1.resumed).toBe(true);
+    expect(t1.status).toBe('completed');
+    expect(t1.response).toEqual({ summary: 'cached research' });
+
+    // Only the developer was actually dispatched; knowledge was reused.
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.invocation.systemPrompt).toContain('developer');
+  });
+
   it('consistency gate passes a clean plan and lets the Developer run', async () => {
     const { journal, runId, projectRoot } = await newRun();
     const { driver } = recordingDriver({ developer: '```json\n{"summary":"impl"}\n```' });
