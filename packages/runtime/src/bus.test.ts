@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Journal, type Handoff } from '@hira/journal';
 import type { LoadedAgent, LoadedSkill } from '@hira/plugin-loader';
-import type { SessionInvocation, SessionResult } from '@hira/session';
+import type { SessionInvocation, SessionResult, StreamEvent } from '@hira/session';
 import { Bus, type BusDriver } from './bus.js';
 
 function agent(name: string, escalates_to: string[] = []): LoadedAgent {
@@ -55,9 +55,16 @@ function makeHandoff(from: string, to: string, runId: string): Handoff {
   };
 }
 
-function fakeDriver(text: string, opts: { exitCode?: number; sessionId?: string } = {}): BusDriver {
+function fakeDriver(
+  text: string,
+  opts: { exitCode?: number; sessionId?: string; emit?: StreamEvent[] } = {},
+): BusDriver {
   return {
-    async run(_invocation: SessionInvocation): Promise<SessionResult> {
+    async run(
+      _invocation: SessionInvocation,
+      onEvent?: (event: StreamEvent) => void,
+    ): Promise<SessionResult> {
+      for (const event of opts.emit ?? []) onEvent?.(event);
       return {
         text,
         sessionId: opts.sessionId ?? 'sess-test',
@@ -172,6 +179,35 @@ describe('Bus.dispatch', () => {
     const result = await bus.dispatch(makeHandoff('user', 'orchestrator', run.id));
     expect(result.response).toBeNull();
     expect(result.responseText).toBe('just prose, no fenced block');
+  });
+
+  it('streams stream-json events into the journal as hand-off progress', async () => {
+    const projectRoot = await mkdtemp(join(tmpdir(), 'hira-bus-'));
+    const journal = new Journal(projectRoot);
+    const run = await journal.openRun('test');
+
+    const bus = makeBus({
+      agents: [agent('orchestrator')],
+      driver: fakeDriver('```json\n{"action":"reply","message":"ok"}\n```', {
+        emit: [
+          { type: 'system', subtype: 'init', session_id: 'sess-9' },
+          { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Read' }] } },
+          { type: 'assistant', message: { content: [{ type: 'text', text: 'almost done now' }] } },
+        ],
+      }),
+      journal,
+      projectRoot,
+    });
+
+    const env = makeHandoff('user', 'orchestrator', run.id);
+    await bus.dispatch(env);
+
+    const data = await journal.getRun(run.id);
+    const progress = data!.handoffs[0]!.progress;
+    expect(progress).toBeDefined();
+    expect(progress!.map((p) => p.phase)).toEqual(['started', 'tool', 'message']);
+    expect(progress!.find((p) => p.phase === 'tool')!.detail).toBe('Read');
+    expect(progress!.find((p) => p.phase === 'started')!.detail).toBe('sess-9');
   });
 
   it('honours an options.tools override on the dispatched invocation', async () => {

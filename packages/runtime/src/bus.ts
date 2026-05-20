@@ -4,10 +4,14 @@ import type { Handoff } from '@hira/journal';
 import type { Journal } from '@hira/journal';
 import {
   composeSystemPrompt,
+  extractAssistantText,
+  isAssistant,
+  isSystemInit,
   loadBehaviouralSkills,
   prepareAgentIsolation,
   type SessionInvocation,
   type SessionResult,
+  type StreamEvent,
 } from '@hira/session';
 import { extractFencedJson } from './fence.js';
 
@@ -15,9 +19,15 @@ import { extractFencedJson } from './fence.js';
  * Minimal driver surface the Bus depends on. The real implementation is
  * `SessionDriver` from `@hira/session`; tests can pass a stub that returns a
  * synthetic `SessionResult` so unit coverage doesn't require burning quota.
+ *
+ * `onEvent` streams parsed stream-json events as they arrive — the Bus uses
+ * it to journal live progress.
  */
 export type BusDriver = {
-  run(invocation: SessionInvocation): Promise<SessionResult>;
+  run(
+    invocation: SessionInvocation,
+    onEvent?: (event: StreamEvent) => void,
+  ): Promise<SessionResult>;
 };
 
 export type BusConfig = {
@@ -98,19 +108,36 @@ export class Bus {
 
     await this.cfg.journal.recordHandoffStart(envelope);
 
-    const result = await this.cfg.driver.run({
-      binary: this.cfg.binary,
-      prompt: renderPromptForHandoff(envelope),
-      systemPrompt,
-      allowedTools,
-      permissionMode: 'acceptEdits',
-      cwd,
-      sessionId: randomUUID(),
-      noSessionPersistence: true,
-      outputFormat: 'stream-json',
-      settingSources: [],
-      settingsPath: isolation.settingsPath,
-    });
+    // Stream live progress into the journal so a hand-off that never
+    // completes (a crash) still shows how far the agent got.
+    const onEvent = (event: StreamEvent): void => {
+      const progress = deriveProgress(event);
+      if (progress) {
+        void this.cfg.journal.recordHandoffProgress(
+          envelope.run_id,
+          envelope.handoff_id,
+          progress.phase,
+          progress.detail,
+        );
+      }
+    };
+
+    const result = await this.cfg.driver.run(
+      {
+        binary: this.cfg.binary,
+        prompt: renderPromptForHandoff(envelope),
+        systemPrompt,
+        allowedTools,
+        permissionMode: 'acceptEdits',
+        cwd,
+        sessionId: randomUUID(),
+        noSessionPersistence: true,
+        outputFormat: 'stream-json',
+        settingSources: [],
+        settingsPath: isolation.settingsPath,
+      },
+      onEvent,
+    );
 
     const response = extractFencedJson(result.text);
     const stderrExcerpt = result.stderr.slice(0, 2048) || undefined;
@@ -175,4 +202,30 @@ function renderPromptForHandoff(envelope: Handoff): string {
     'Payload:',
     payloadText,
   ].join('\n');
+}
+
+/**
+ * Project a stream-json event into a compact journal progress entry, or
+ * null for events not worth journaling (user echoes, tool results, the
+ * final result — which `completeHandoff` already captures).
+ */
+function deriveProgress(event: StreamEvent): { phase: string; detail?: string } | null {
+  if (isSystemInit(event)) {
+    return { phase: 'started', ...(event.session_id ? { detail: event.session_id } : {}) };
+  }
+  if (isAssistant(event)) {
+    const blocks = event.message?.content ?? [];
+    const tools = blocks
+      .filter((b) => b.type === 'tool_use')
+      .map((b) => (b as { name?: unknown }).name)
+      .filter((n): n is string => typeof n === 'string');
+    if (tools.length > 0) {
+      return { phase: 'tool', detail: tools.join(', ') };
+    }
+    const text = extractAssistantText(event).replace(/\s+/g, ' ').trim();
+    if (text) {
+      return { phase: 'message', detail: text.length > 80 ? text.slice(0, 77) + '...' : text };
+    }
+  }
+  return null;
 }

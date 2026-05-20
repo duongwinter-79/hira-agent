@@ -79,6 +79,18 @@ export type RunRecord = {
 
 export type HandoffStatus = 'pending' | 'in_progress' | 'completed' | 'failed';
 
+/**
+ * A live progress entry streamed from a hand-off's agent session while it
+ * runs. Lets a crashed, never-completed hand-off still show how far it got.
+ */
+export type HandoffProgress = {
+  at: string;
+  /** 'started' | 'message' | 'tool'. */
+  phase: string;
+  /** Session id, tool name(s), or a short message preview. */
+  detail?: string;
+};
+
 export type HandoffRecord = Handoff & {
   status: HandoffStatus;
   started_at: string;
@@ -93,4 +105,6 @@ export type HandoffRecord = Handoff & {
   exit_code?: number;
   /** First 2 KB of stderr; full stderr is in the per-agent run dir. */
   stderr_excerpt?: string;
+  /** Live progress trail streamed while the hand-off ran. */
+  progress?: HandoffProgress[];
 };

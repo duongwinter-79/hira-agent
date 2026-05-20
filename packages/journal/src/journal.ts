@@ -28,7 +28,15 @@ type JournalEvent =
     }
   | ({ t: 'artifact_recorded'; run_id: string } & Artifact)
   | { t: 'run_closed'; run_id: string; ended_at: string; status: RunStatus }
-  | { t: 'run_approval'; run_id: string; decision: RunApproval; at: string };
+  | { t: 'run_approval'; run_id: string; decision: RunApproval; at: string }
+  | {
+      t: 'handoff_progress';
+      run_id: string;
+      handoff_id: string;
+      at: string;
+      phase: string;
+      detail?: string;
+    };
 
 /**
  * Append-only JSONL journal at `.hira/runs/<run_id>/journal.jsonl`.
@@ -44,6 +52,12 @@ export class Journal {
   private readonly runsRoot: string;
   /** Per-run, per-artifact-kind monotonic sequence counters. */
   private readonly seqCounters = new Map<string, number>();
+  /**
+   * Serialises all appends so concurrent writes — e.g. fire-and-forget
+   * live progress events racing the awaited `completeHandoff` — cannot
+   * interleave bytes in the JSONL file.
+   */
+  private writeQueue: Promise<unknown> = Promise.resolve();
 
   constructor(projectRoot: string) {
     this.runsRoot = join(projectRoot, '.hira', 'runs');
@@ -133,6 +147,27 @@ export class Journal {
     });
   }
 
+  /**
+   * Append a live progress entry for an in-flight hand-off. Called as the
+   * agent's session streams events, so a hand-off that never completes
+   * (a crash) still shows how far it got.
+   */
+  async recordHandoffProgress(
+    runId: string,
+    handoffId: string,
+    phase: string,
+    detail?: string,
+  ): Promise<void> {
+    await this.append(runId, {
+      t: 'handoff_progress',
+      run_id: runId,
+      handoff_id: handoffId,
+      at: new Date().toISOString(),
+      phase,
+      ...(detail !== undefined ? { detail } : {}),
+    });
+  }
+
   async listRuns(limit = 50): Promise<RunRecord[]> {
     const entries = await safeReaddir(this.runsRoot);
     const runs: RunRecord[] = [];
@@ -166,9 +201,14 @@ export class Journal {
     return join(this.runsRoot, runId);
   }
 
-  private async append(runId: string, event: JournalEvent): Promise<void> {
+  private append(runId: string, event: JournalEvent): Promise<void> {
     const path = join(this.runsRoot, runId, 'journal.jsonl');
-    await appendFile(path, JSON.stringify(event) + '\n', 'utf8');
+    const line = JSON.stringify(event) + '\n';
+    const result = this.writeQueue.then(() => appendFile(path, line, 'utf8'));
+    // Keep the queue alive even if one write rejects; the caller still
+    // sees the real error via the returned promise.
+    this.writeQueue = result.catch(() => undefined);
+    return result;
   }
 
   private async readEvents(runId: string): Promise<JournalEvent[]> {
@@ -226,6 +266,17 @@ function projectHandoffsAndArtifacts(events: JournalEvent[]): {
           exit_code: e.exit_code ?? existing.exit_code,
           stderr_excerpt: e.stderr_excerpt ?? existing.stderr_excerpt,
         });
+      }
+    } else if (e.t === 'handoff_progress') {
+      const existing = handoffs.get(e.handoff_id);
+      if (existing) {
+        const progress = [...(existing.progress ?? [])];
+        progress.push({
+          at: e.at,
+          phase: e.phase,
+          ...(e.detail !== undefined ? { detail: e.detail } : {}),
+        });
+        handoffs.set(e.handoff_id, { ...existing, progress });
       }
     } else if (e.t === 'artifact_recorded') {
       const { t: _t, run_id: _r, ...rest } = e;

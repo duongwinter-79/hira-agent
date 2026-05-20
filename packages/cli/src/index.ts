@@ -312,6 +312,19 @@ runs
           `      reply: ${oneLine.length > 100 ? oneLine.slice(0, 97) + '...' : oneLine}`,
         );
       }
+      if (h.progress && h.progress.length > 0) {
+        const last = h.progress[h.progress.length - 1]!;
+        console.log(
+          `      progress: ${h.progress.length} event(s), last: ${last.phase}${last.detail ? ` ${last.detail}` : ''}`,
+        );
+        // For a hand-off that never completed (a crash), show the trail so
+        // the user can see exactly how far the agent got.
+        if (h.status === 'in_progress') {
+          for (const p of h.progress.slice(-8)) {
+            console.log(`        · ${p.phase}${p.detail ? ` — ${p.detail}` : ''}`);
+          }
+        }
+      }
     }
     if (artifacts.length > 0) {
       console.log();
