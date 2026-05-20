@@ -83,6 +83,7 @@ describe('Executor', () => {
     const exec = new Executor({
       bus,
       journal,
+      projectRoot,
       wiredOwners: new Set(['knowledge', 'solution-architect']),
     });
 
@@ -126,6 +127,7 @@ describe('Executor', () => {
     const exec = new Executor({
       bus,
       journal,
+      projectRoot,
       wiredOwners: new Set(['knowledge', 'solution-architect']),
     });
 
@@ -153,6 +155,7 @@ describe('Executor', () => {
     const exec = new Executor({
       bus,
       journal,
+      projectRoot,
       wiredOwners: new Set(['knowledge']),
       toolsOverride: ['Read', 'Grep'],
     });
@@ -180,6 +183,7 @@ describe('Executor', () => {
     const exec = new Executor({
       bus,
       journal,
+      projectRoot,
       wiredOwners: new Set(['knowledge']),
     });
     const cyclic: PlannerTask[] = [
@@ -206,6 +210,7 @@ describe('Executor', () => {
     const exec = new Executor({
       bus,
       journal,
+      projectRoot,
       wiredOwners: new Set(['knowledge']),
     });
     const out = await exec.run({
@@ -243,6 +248,7 @@ describe('Executor', () => {
     const exec = new Executor({
       bus,
       journal,
+      projectRoot,
       wiredOwners: new Set(['knowledge']),
       memoryContext,
     });
@@ -257,7 +263,7 @@ describe('Executor', () => {
     expect(promptText).toContain('Use sqlite');
   });
 
-  it('records a verification artifact after a successful Developer task (no-op seam)', async () => {
+  it('verification seam reports skipped when no config is supplied', async () => {
     const { journal, runId, projectRoot } = await newRun();
     const { driver } = recordingDriver({
       developer: '```json\n{"summary":"impl"}\n```',
@@ -273,6 +279,7 @@ describe('Executor', () => {
     const exec = new Executor({
       bus,
       journal,
+      projectRoot,
       wiredOwners: new Set(['developer']),
     });
 
@@ -287,6 +294,46 @@ describe('Executor', () => {
     const verArtifacts = data!.artifacts.filter((a) => a.kind === 'verification');
     expect(verArtifacts).toHaveLength(1);
     expect(verArtifacts[0]!.handoff_id).toBe(out.executions[0]!.handoff_id);
+  });
+
+  it('verification seam runs configured checks and gates on failure', async () => {
+    const { journal, runId, projectRoot } = await newRun();
+    const { driver } = recordingDriver({
+      developer: '```json\n{"summary":"impl"}\n```',
+    });
+    const bus = new Bus({
+      agents: [agent('developer')],
+      skills: [],
+      journal,
+      projectRoot,
+      driver,
+      binary: 'claude',
+    });
+    const exec = new Executor({
+      bus,
+      journal,
+      projectRoot,
+      wiredOwners: new Set(['developer']),
+      verificationConfig: {
+        checks: [
+          { name: 'green', command: 'exit 0' },
+          { name: 'red', command: 'exit 1' },
+        ],
+      },
+    });
+
+    const out = await exec.run({
+      runId,
+      parentHandoffId: 'p',
+      tasks: [{ id: 't1', description: 'implement', owner: 'developer', depends_on: [] }],
+    });
+
+    const report = out.executions[0]!.verification;
+    expect(report?.status).toBe('fail');
+    expect(report?.stages.map((s) => `${s.name}:${s.status}`)).toEqual([
+      'green:pass',
+      'red:fail',
+    ]);
   });
 });
 

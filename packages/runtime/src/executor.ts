@@ -3,7 +3,7 @@ import type { Handoff, Journal } from '@hira/journal';
 import type { MemoryRecord } from '@hira/memory';
 import { type Bus, type DispatchResult } from './bus.js';
 import { type VerificationReport } from '@hira/journal';
-import { verifyDeveloperHandoff } from './verification.js';
+import { verifyDeveloperHandoff, type VerificationConfig } from './verification.js';
 
 /** Subset of the planner's task graph the executor walks. */
 export type PlannerTask = {
@@ -38,6 +38,8 @@ export type ExecutorConfig = {
   journal: Journal;
   /** Agent names that have real system prompts in this milestone. */
   wiredOwners: Set<string>;
+  /** Project root — where the Verification Engine runs its checks. */
+  projectRoot: string;
   /**
    * Optional tool allowlist override applied to every specialist
    * dispatch — used in M1.3 to keep Developer/Tester read-only until
@@ -51,6 +53,12 @@ export type ExecutorConfig = {
    * cite them by `memory:<id>`.
    */
   memoryContext?: MemoryRecord[];
+  /**
+   * Deterministic Verification Engine config (SPEC §4.8). When present,
+   * the engine runs the configured checks after each Developer hand-off.
+   * Null/undefined → the engine reports `skipped`.
+   */
+  verificationConfig?: VerificationConfig | null;
 };
 
 export type ExecutorInput = {
@@ -118,6 +126,7 @@ export class Executor {
             task_id: d.task.id,
             owner: d.task.owner,
             response: d.response,
+            verification: d.verification ?? null,
           })),
           memory_context: this.cfg.memoryContext ?? [],
         },
@@ -136,13 +145,16 @@ export class Executor {
       executions.push(exec);
 
       // Verification seam (SPEC §4.8): after a successful Developer task,
-      // run the deterministic Verification Engine. In M1.3 it is a no-op
-      // pass-through; M1.5 fills it in.
+      // run the deterministic Verification Engine. M1.5.a runs the
+      // project's configured checks; the report is journaled and flows
+      // into the Reviewer's input.
       if (task.owner === 'developer' && exec.status === 'completed') {
         exec.verification = await verifyDeveloperHandoff(exec, {
           journal: this.cfg.journal,
           runId: input.runId,
           parentHandoffId: envelope.handoff_id,
+          projectRoot: this.cfg.projectRoot,
+          config: this.cfg.verificationConfig ?? null,
         });
         lastDeveloperExec = exec;
       }

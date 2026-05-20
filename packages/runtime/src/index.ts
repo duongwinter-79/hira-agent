@@ -65,7 +65,16 @@ export type {
   PlannerTask,
   TaskExecution,
 } from './executor.js';
-export { verifyDeveloperHandoff } from './verification.js';
+export {
+  verifyDeveloperHandoff,
+  runVerificationEngine,
+  loadVerificationConfig,
+} from './verification.js';
+export type {
+  VerificationConfig,
+  VerificationCheck,
+  VerificationEngineOptions,
+} from './verification.js';
 
 export { MemoryStore, MemoryRecordSchema, NewMemoryRecordSchema, MemoryKindSchema } from '@hira/memory';
 export type { MemoryRecord, NewMemoryRecord, MemoryKind, MemorySource } from '@hira/memory';

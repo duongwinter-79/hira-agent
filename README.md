@@ -209,6 +209,31 @@ If you haven't linked it globally, prefix every command with
 
 ---
 
+## Configuration
+
+An optional `hira.config.json` at the project root drives the
+deterministic Verification Engine. After a Developer hand-off the
+runtime runs each declared check and feeds the structured result into
+the Reviewer:
+
+```json
+{
+  "verification": {
+    "checks": [
+      { "name": "build", "command": "pnpm -r build", "timeout_ms": 180000 },
+      { "name": "test", "command": "pnpm -r test" }
+    ]
+  }
+}
+```
+
+Each check is a shell command run from the project root; a non-zero
+exit marks the stage `fail`. With no `hira.config.json` the engine
+reports `skipped` — there is no auto-detection, the checks are exactly
+what you declare.
+
+---
+
 ## Example usage
 
 ### Direct reply

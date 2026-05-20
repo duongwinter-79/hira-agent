@@ -13,6 +13,7 @@ import {
   composeSystemPrompt,
   loadBehaviouralSkills,
   loadPlugins,
+  loadVerificationConfig,
   type Handoff,
   type LoadedAgent,
   type LoadedSkill,
@@ -205,13 +206,19 @@ program
         const memoryContext = await memory.query(message, 5);
         const tasksWithMemory: PlannerTask[] = tasks.map((t) => ({ ...t }));
 
+        // Load the deterministic Verification Engine config (SPEC §4.8).
+        // Absent hira.config.json → engine reports `skipped`.
+        const verificationConfig = await loadVerificationConfig(project);
+
         // Walk the task graph through wired specialists.
         const executor = new Executor({
           bus,
           journal,
+          projectRoot: project,
           wiredOwners: WIRED_OWNERS,
           toolsOverride: SPECIALIST_READ_ONLY_TOOLS,
           memoryContext,
+          verificationConfig,
         });
         const execOut = await executor.run({
           runId: run.id,

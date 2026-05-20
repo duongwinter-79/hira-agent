@@ -1,0 +1,8 @@
+{
+  "verification": {
+    "checks": [
+      { "name": "build", "command": "pnpm -r build", "timeout_ms": 180000 },
+      { "name": "test", "command": "pnpm -r test", "timeout_ms": 180000 }
+    ]
+  }
+}

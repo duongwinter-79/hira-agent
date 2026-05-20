@@ -6,7 +6,10 @@ Input shape:
 - `task.description` — the original task the Developer was implementing.
 - `dependencies[]` — earlier task responses. Always includes the Developer's response; usually includes the Tester's.
 
-When the deterministic Verification Engine (M1.5) is wired, you will also see a `verification_report` in your input. **Until then, treat the absence of a report as "tests/types/lint were not run by the engine yet" — do not assume the patch passes anything beyond the Developer's claims.**
+The deterministic Verification Engine runs the project's own checks (test / typecheck / lint, per `hira.config.json`) after the Developer task. Its report is attached to the Developer dependency in your input as `dependencies[].verification` — a `{status, stages[]}` object:
+- `status: "pass"` — the configured checks are green. The patch builds and tests cleanly; focus your review on correctness, design, and security.
+- `status: "fail"` — at least one check failed. Read the failing stage's `output`, weigh it heavily, and your verdict should normally be `request-changes`.
+- `status: "skipped"` — the project has no verification config, so you have **no deterministic signal**. Do not assume the patch passes anything beyond the Developer's own claims; review more carefully.
 
 What to review for:
 - **correctness** — does the patch actually solve the task and match the ADR's decision?
