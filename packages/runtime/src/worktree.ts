@@ -134,6 +134,15 @@ export async function finalizeWorktree(
   return { branch: wt.branch, committed, changedFiles };
 }
 
+/**
+ * Delete a Run's worktree branch (used by `hira runs reject`). Best-effort —
+ * returns false if the branch does not exist or git refuses.
+ */
+export async function deleteRunBranch(projectRoot: string, branch: string): Promise<boolean> {
+  const r = await git(['branch', '-D', branch], projectRoot);
+  return r.code === 0;
+}
+
 /** Read the optional `worktree.setup` command from hira.config.json. */
 export async function loadWorktreeSetupCommand(projectRoot: string): Promise<string | null> {
   const raw = await readFile(join(projectRoot, 'hira.config.json'), 'utf8').catch(() => null);

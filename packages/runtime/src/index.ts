@@ -82,11 +82,14 @@ export {
   runWorktreeSetup,
   finalizeWorktree,
   loadWorktreeSetupCommand,
+  deleteRunBranch,
 } from './worktree.js';
 export type { RunWorktree, WorktreeOutcome } from './worktree.js';
 
 export { buildRunTrace, traceArtifact } from './trace.js';
 export type { RunTrace, TracedTask, FramingHandoff, ArtifactTrace } from './trace.js';
+
+export { writeMemoryDelta, readMemoryDelta } from './delta.js';
 
 export { MemoryStore, MemoryRecordSchema, NewMemoryRecordSchema, MemoryKindSchema } from '@hira/memory';
 export type { MemoryRecord, NewMemoryRecord, MemoryKind, MemorySource } from '@hira/memory';

@@ -204,6 +204,10 @@ hira runs show <run_id>
 hira runs trace <run_id>
 hira runs trace <artifact_id>      # e.g. verification:1a2b3c4d:1
 
+# Approve a Run to fold its memory deltas into the baseline, or reject it.
+hira runs approve <run_id>
+hira runs reject <run_id>
+
 # Inspect the cross-Run memory store.
 hira memory list
 hira memory query "<keywords>"

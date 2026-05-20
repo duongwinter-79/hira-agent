@@ -13,19 +13,24 @@ import {
   buildRunTrace,
   composeSystemPrompt,
   createRunWorktree,
+  deleteRunBranch,
   finalizeWorktree,
   isGitRepo,
   loadBehaviouralSkills,
   loadPlugins,
   loadVerificationConfig,
   loadWorktreeSetupCommand,
+  readMemoryDelta,
   runWorktreeSetup,
   traceArtifact,
+  writeMemoryDelta,
   type Handoff,
   type LoadedAgent,
   type LoadedSkill,
   type MemoryRecord,
+  type NewMemoryRecord,
   type PlannerTask,
+  type RunRecord,
   type RunWorktree,
   type TaskExecution,
   type WorktreeOutcome,
@@ -277,12 +282,12 @@ program
           }
         }
 
-        // Memory Maintainer: read the chain and extract new records.
-        // Runs before synthesis so the synthesis can announce records written.
+        // Memory Maintainer: read the chain and stage proposed records as
+        // this Run's memory delta (folded into baseline by `hira runs approve`).
         const newRecords = await runMemoryMaintainer({
           bus,
           journal,
-          memory,
+          runDir: journal.runDir(run.id),
           runId: run.id,
           parentHandoffId: planEnvelope.handoff_id,
           intent: message,
@@ -302,6 +307,7 @@ program
           payload: {
             message: buildSynthesisPrompt(
               message,
+              run.id,
               planResult.response,
               execOut.executions,
               memoryContext,
@@ -363,11 +369,12 @@ runs
     }
     for (const r of list) {
       const intent =
-        r.intent_message.length > 60
-          ? r.intent_message.slice(0, 57) + '...'
+        r.intent_message.length > 54
+          ? r.intent_message.slice(0, 51) + '...'
           : r.intent_message;
+      const approval = (r.approval ?? 'pending').padEnd(8);
       console.log(
-        `${r.id}  ${r.started_at}  ${r.status.padEnd(10)}  ${intent}`,
+        `${r.id}  ${r.started_at}  ${r.status.padEnd(10)}  ${approval}  ${intent}`,
       );
     }
   });
@@ -386,10 +393,11 @@ runs
     }
     const { run, handoffs, artifacts } = data;
     console.log(`Run ${run.id}`);
-    console.log(`  status:  ${run.status}`);
-    console.log(`  started: ${run.started_at}`);
-    if (run.ended_at) console.log(`  ended:   ${run.ended_at}`);
-    console.log(`  intent:  ${run.intent_message}`);
+    console.log(`  status:   ${run.status}`);
+    console.log(`  approval: ${run.approval ?? 'pending'}`);
+    console.log(`  started:  ${run.started_at}`);
+    if (run.ended_at) console.log(`  ended:    ${run.ended_at}`);
+    console.log(`  intent:   ${run.intent_message}`);
     console.log();
     console.log(`Hand-offs (${handoffs.length}):`);
     for (const h of handoffs) {
@@ -514,6 +522,74 @@ runs
         console.log(`       ◆ ${a.id}  ${summariseArtifactPayload(a.payload)}`);
       }
     }
+  });
+
+runs
+  .command('approve')
+  .description('Approve a Run: fold its memory deltas into the baseline (SPEC §4.8)')
+  .argument('<run_id>', 'a run id or unique prefix')
+  .option('--project <path>', 'project root', process.cwd())
+  .action(async (runId: string, opts: { project: string }) => {
+    const project = resolve(opts.project);
+    const journal = new Journal(project);
+    const run = await resolveRun(journal, runId);
+    if (!run) {
+      console.error(`run not found: ${runId}`);
+      process.exit(1);
+    }
+    if (run.status !== 'succeeded') {
+      console.error(`cannot approve Run ${run.id}: status is '${run.status}' (only succeeded Runs).`);
+      process.exit(1);
+    }
+    if (run.approval) {
+      console.error(`Run ${run.id} already has a decision: ${run.approval}.`);
+      process.exit(1);
+    }
+
+    const deltas = await readMemoryDelta(journal.runDir(run.id));
+    const memory = new MemoryStore(project);
+    let folded = 0;
+    for (const record of deltas) {
+      await memory.write(record);
+      folded++;
+    }
+    await journal.recordApproval(run.id, 'approved');
+
+    console.log(`Approved Run ${run.id}.`);
+    console.log(`  ${folded} memory record(s) folded into the baseline store.`);
+    const branch = `hira/run-${run.id.slice(0, 8)}`;
+    console.log(`  Code changes (if any) are on branch ${branch} — merge with: git merge ${branch}`);
+  });
+
+runs
+  .command('reject')
+  .description("Reject a Run: discard its deltas and delete its worktree branch")
+  .argument('<run_id>', 'a run id or unique prefix')
+  .option('--project <path>', 'project root', process.cwd())
+  .action(async (runId: string, opts: { project: string }) => {
+    const project = resolve(opts.project);
+    const journal = new Journal(project);
+    const run = await resolveRun(journal, runId);
+    if (!run) {
+      console.error(`run not found: ${runId}`);
+      process.exit(1);
+    }
+    if (run.approval) {
+      console.error(`Run ${run.id} already has a decision: ${run.approval}.`);
+      process.exit(1);
+    }
+
+    await journal.recordApproval(run.id, 'rejected');
+    const branch = `hira/run-${run.id.slice(0, 8)}`;
+    const deleted = await deleteRunBranch(project, branch);
+
+    console.log(`Rejected Run ${run.id}.`);
+    console.log('  Memory deltas were not folded; the baseline is unchanged.');
+    console.log(
+      deleted
+        ? `  Deleted worktree branch ${branch}.`
+        : `  No worktree branch ${branch} to delete.`,
+    );
   });
 
 // ---------- memory ----------
@@ -643,6 +719,12 @@ async function renderSystemPrompt(
   return composeSystemPrompt(agent.systemPrompt, behavioural);
 }
 
+/** Resolve a run by full id or unique prefix. */
+async function resolveRun(journal: Journal, idOrPrefix: string): Promise<RunRecord | undefined> {
+  const list = await journal.listRuns(500);
+  return list.find((r) => r.id === idOrPrefix) ?? list.find((r) => r.id.startsWith(idOrPrefix));
+}
+
 /** One-line summary of an artifact's payload for the trace view. */
 function summariseArtifactPayload(payload: unknown): string {
   if (!payload || typeof payload !== 'object') return String(payload ?? '');
@@ -710,10 +792,11 @@ function parseTasks(response: unknown): PlannerTask[] | null {
 
 function buildSynthesisPrompt(
   intent: string,
+  runId: string,
   plan: unknown,
   executions: TaskExecution[],
   memoryContext: MemoryRecord[],
-  memoryRecordsWritten: MemoryRecord[],
+  memoryRecordsProposed: NewMemoryRecord[],
   gate: { gateFailed: boolean; worktree?: WorktreeOutcome },
 ): string {
   const taskResults = executions.map((e) => ({
@@ -728,6 +811,7 @@ function buildSynthesisPrompt(
   return [
     'SYNTHESIS REQUEST',
     '',
+    `run_id: ${runId}`,
     `original_intent: ${intent}`,
     '',
     'memory_context (records the runtime fetched for this Run):',
@@ -755,9 +839,9 @@ function buildSynthesisPrompt(
       2,
     ),
     '',
-    'memory_records_written (newly persisted by the Memory Maintainer):',
+    `memory_records_proposed (staged as deltas — fold with \`hira runs approve ${runId}\`):`,
     JSON.stringify(
-      memoryRecordsWritten.map((r) => ({ id: r.id, kind: r.kind, title: r.title })),
+      memoryRecordsProposed.map((r) => ({ kind: r.kind, title: r.title })),
       null,
       2,
     ),
@@ -766,16 +850,22 @@ function buildSynthesisPrompt(
   ].join('\n');
 }
 
+/**
+ * Dispatch the Memory Maintainer and stage its proposed records as this
+ * Run's memory delta (SPEC §4.8). Records do NOT touch baseline memory
+ * here — `hira runs approve` folds them in. Returns the proposed records
+ * so the synthesis can announce them.
+ */
 async function runMemoryMaintainer(args: {
   bus: Bus;
   journal: Journal;
-  memory: MemoryStore;
+  runDir: string;
   runId: string;
   parentHandoffId: string;
   intent: string;
   plan: unknown;
   executions: TaskExecution[];
-}): Promise<MemoryRecord[]> {
+}): Promise<NewMemoryRecord[]> {
   const envelope: Handoff = {
     run_id: args.runId,
     handoff_id: randomUUID(),
@@ -801,30 +891,31 @@ async function runMemoryMaintainer(args: {
   const result = await args.bus.dispatch(envelope);
   if (result.exitCode !== 0) {
     process.stderr.write(
-      `(warning: memory maintainer exited ${result.exitCode}; no records persisted for this Run)\n`,
+      `(warning: memory maintainer exited ${result.exitCode}; no records proposed for this Run)\n`,
     );
     return [];
   }
 
   const proposed = parseMemoryRecords(result.response);
-  if (proposed.length === 0) return [];
-
-  const persisted: MemoryRecord[] = [];
+  const validated: NewMemoryRecord[] = [];
   for (const r of proposed) {
-    try {
-      const validated = NewMemoryRecordSchema.parse({
-        ...r,
-        source: { run_id: args.runId, handoff_id: envelope.handoff_id },
-      });
-      const written = await args.memory.write(validated);
-      persisted.push(written);
-    } catch (err) {
+    const parsedRecord = NewMemoryRecordSchema.safeParse({
+      ...(r as object),
+      source: { run_id: args.runId, handoff_id: envelope.handoff_id },
+    });
+    if (parsedRecord.success) {
+      validated.push(parsedRecord.data);
+    } else {
       process.stderr.write(
-        `(warning: skipping malformed memory record: ${err instanceof Error ? err.message : String(err)})\n`,
+        `(warning: skipping malformed memory record: ${parsedRecord.error.message})\n`,
       );
     }
   }
-  return persisted;
+
+  if (validated.length > 0) {
+    await writeMemoryDelta(args.runDir, validated);
+  }
+  return validated;
 }
 
 function parseMemoryRecords(response: unknown): unknown[] {

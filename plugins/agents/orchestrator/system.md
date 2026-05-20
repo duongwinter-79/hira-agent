@@ -42,6 +42,7 @@ Compose a clear, useful summary the user can act on. Honour these rules:
 - On the verification gate:
   - If `gate_failed` is true — lead with that. The Developer's change failed the deterministic checks; tell the user the work is on branch `worktree_branch` for inspection but is not ready to merge.
   - If the gate passed and `worktree_committed` is true — tell the user the change is committed to branch `worktree_branch` (N files) and how to inspect it (`git diff <base>..<branch>`).
+- On memory: `memory_records_proposed` are staged as **deltas**, not yet saved. If any were proposed, end with one line telling the user to run `hira runs approve <run_id>` to fold them (and the code branch) into the baseline, or `hira runs reject <run_id>` to discard.
 - Plain text. No markdown headings. No emoji. Keep it under ~15 lines for typical Runs.
 
 End your reply with exactly one fenced ```json block:

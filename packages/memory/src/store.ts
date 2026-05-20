@@ -50,7 +50,13 @@ export class MemoryStore {
     return record;
   }
 
-  /** Return all records, optionally filtered. */
+  /**
+   * Return all records, optionally filtered, newest first.
+   *
+   * The cache is in append (chronological) order, so "newest first" is a
+   * stable reverse — no `created_at` sort, which would tie and reorder
+   * unpredictably when several records are written in the same millisecond.
+   */
   async list(filters: { kind?: MemoryKind; tags?: string[] } = {}): Promise<MemoryRecord[]> {
     await this.warmCache();
     let out = this.cache ?? [];
@@ -59,7 +65,7 @@ export class MemoryStore {
       const wanted = new Set(filters.tags.map((t) => t.toLowerCase()));
       out = out.filter((r) => r.tags.some((t) => wanted.has(t.toLowerCase())));
     }
-    return [...out].sort((a, b) => b.created_at.localeCompare(a.created_at));
+    return [...out].reverse();
   }
 
   /** Get one record by id. */
@@ -78,7 +84,9 @@ export class MemoryStore {
     const terms = tokenise(text);
     if (terms.length === 0) return [];
     const scored: { record: MemoryRecord; score: number }[] = [];
-    for (const r of this.cache ?? []) {
+    // Iterate newest-first so that, after a stable sort by score, records
+    // with equal scores stay in newest-first order.
+    for (const r of [...(this.cache ?? [])].reverse()) {
       let score = 0;
       const tagBag = r.tags.map((t) => t.toLowerCase()).join(' ');
       const titleLc = r.title.toLowerCase();
@@ -90,7 +98,7 @@ export class MemoryStore {
       }
       if (score > 0) scored.push({ record: r, score });
     }
-    scored.sort((a, b) => b.score - a.score || b.record.created_at.localeCompare(a.record.created_at));
+    scored.sort((a, b) => b.score - a.score);
     return scored.slice(0, limit).map((s) => s.record);
   }
 
