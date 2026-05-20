@@ -24,6 +24,7 @@ import {
   runWorktreeSetup,
   traceArtifact,
   writeMemoryDelta,
+  type ConsistencyReport,
   type Handoff,
   type LoadedAgent,
   type LoadedSkill,
@@ -245,6 +246,13 @@ program
           }
         }
 
+        // Baseline ADRs for the Cross-Artifact Consistency gate (SPEC §4.8).
+        const baselineAdrs = (await memory.list({ kind: 'adr' })).map((r) => ({
+          id: r.id,
+          title: r.title,
+          tags: r.tags,
+        }));
+
         // Walk the task graph through wired specialists.
         const executor = new Executor({
           bus,
@@ -254,6 +262,8 @@ program
           toolsOverride: SPECIALIST_READ_ONLY_TOOLS,
           memoryContext,
           verificationConfig,
+          knownOwners: new Set(agents.map((a) => a.manifest.name)),
+          baselineAdrs,
           ...(worktree ? { worktree: { path: worktree.path } } : {}),
         });
         const execOut = await executor.run({
@@ -312,7 +322,11 @@ program
               execOut.executions,
               memoryContext,
               newRecords,
-              { gateFailed: execOut.gate_failed ?? false, worktree: worktreeOutcome },
+              {
+                gateFailed: execOut.gate_failed ?? false,
+                worktree: worktreeOutcome,
+                consistency: execOut.consistency,
+              },
             ),
           },
           artifacts: [],
@@ -797,7 +811,11 @@ function buildSynthesisPrompt(
   executions: TaskExecution[],
   memoryContext: MemoryRecord[],
   memoryRecordsProposed: NewMemoryRecord[],
-  gate: { gateFailed: boolean; worktree?: WorktreeOutcome },
+  gate: {
+    gateFailed: boolean;
+    worktree?: WorktreeOutcome;
+    consistency?: ConsistencyReport;
+  },
 ): string {
   const taskResults = executions.map((e) => ({
     task_id: e.task.id,
@@ -826,6 +844,16 @@ function buildSynthesisPrompt(
     '',
     'task_results (in dependency order):',
     JSON.stringify(taskResults, null, 2),
+    '',
+    'consistency_gate (Cross-Artifact Consistency check, SPEC §4.8):',
+    JSON.stringify(
+      {
+        status: gate.consistency?.status ?? 'not-run',
+        issues: gate.consistency?.issues ?? [],
+      },
+      null,
+      2,
+    ),
     '',
     'verification_gate:',
     JSON.stringify(

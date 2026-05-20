@@ -91,5 +91,16 @@ export type { RunTrace, TracedTask, FramingHandoff, ArtifactTrace } from './trac
 
 export { writeMemoryDelta, readMemoryDelta } from './delta.js';
 
+export { checkConsistency } from './consistency.js';
+export type {
+  ConsistencyReport,
+  ConsistencyIssue,
+  ConsistencySeverity,
+  ConsistencyTask,
+  ConsistencyAdr,
+  ConsistencyInput,
+  BaselineAdr,
+} from './consistency.js';
+
 export { MemoryStore, MemoryRecordSchema, NewMemoryRecordSchema, MemoryKindSchema } from '@hira/memory';
 export type { MemoryRecord, NewMemoryRecord, MemoryKind, MemorySource } from '@hira/memory';

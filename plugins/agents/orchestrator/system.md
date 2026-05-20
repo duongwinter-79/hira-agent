@@ -39,6 +39,9 @@ Compose a clear, useful summary the user can act on. Honour these rules:
   - **developer** — name the files changed and the headline change; flag any `open_questions`. If `attempts` is 2, say the Developer needed a retry after the first verification failure.
   - **tester** — give the test count and the framework.
   - **reviewer** — state the verdict; if `request-changes`, list the blockers in one or two sentences.
+- On the consistency gate (`consistency_gate`):
+  - If `status` is `blocked` — lead with that. The plan failed the Cross-Artifact Consistency check before implementation; list the blocker `issues` and tell the user the plan needs revision. Implementation / test / review did not run.
+  - If `status` is `warnings` — mention the warnings briefly (usually a new ADR overlapping a prior decision) so the user can check for duplication.
 - On the verification gate:
   - If `gate_failed` is true — lead with that. The Developer's change failed the deterministic checks; tell the user the work is on branch `worktree_branch` for inspection but is not ready to merge.
   - If the gate passed and `worktree_committed` is true — tell the user the change is committed to branch `worktree_branch` (N files) and how to inspect it (`git diff <base>..<branch>`).

@@ -637,7 +637,7 @@ runs:
 | **M1.5.b — Real Developer edits + hard gate** ✅ | Per-Run git worktree (`@hira/runtime/worktree.ts`) at `.hira/runs/<run_id>/worktree/` on a throwaway `hira/run-<short>` branch. The Developer runs there with real `Edit/Write/Bash`; Tester/Reviewer read there; Knowledge/Architect stay on the project root. Bus gained a per-dispatch `cwd` override; the Executor routes cwd + tools per owner. The Verification Engine verifies the worktree (the actual diff). A failing report routes the task **back to the Developer once** with the `verification_failure` payload attached; still failing → `gate_failed`, downstream tasks skipped. On finalize the worktree is committed to its branch and the directory removed. Non-git projects degrade to read-only dry mode. |
 | **M1.5.c-1 — Traceability view** ✅ | `buildRunTrace` re-projects the journal into a `RunTrace` (Planner task graph annotated with each task's hand-off, status, retry count, and artifacts; framing hand-offs separated out). `traceArtifact` walks a DAG: backward from an artifact to the requirements that produced it, forward to the tasks that consumed it. `hira runs trace <run_id>` renders the task chain; `hira runs trace <artifact_id>` renders the bidirectional walk (§4.9). |
 | **M1.5.c-2 — Spec/ADR delta state machine** ✅ | The Memory Maintainer no longer auto-writes baseline. Its proposed records (ADRs + outcomes) are staged as a *delta* in `.hira/runs/<run_id>/deltas/memory.json` (`@hira/runtime/delta.ts`). `hira runs approve <run_id>` folds the delta into the baseline memory store and records the decision in the journal; `hira runs reject` records rejection and deletes the Run's worktree branch. Decisions are immutable. The journal carries an `approval` field per Run, surfaced in `runs list` / `runs show`. Code-as-delta stays the worktree branch from M1.5.b — `approve` reports it for `git merge` rather than auto-merging. Failed/unapproved Runs leave the baseline untouched (§4.8). |
-| **M1.5.c-3 — spec-consistency skill** | Cross-Artifact Consistency pass as an MCP skill — needs the `@hira/mcp-skills` server, the first MCP infrastructure in the project (§4.6, §4.8). |
+| **M1.5.c-3 — spec-consistency check + first MCP server** ✅ | `checkConsistency` (`@hira/runtime/consistency.ts`) — deterministic Cross-Artifact Consistency check (SPEC §4.8): structural blockers (no tasks, empty description, unknown owner, dangling dependency, cycle) + memory-overlap warnings. The Executor runs it as a gate before the first Developer task; a `blocked` report halts dispatch and skips the Developer + downstream. `@hira/mcp-skills` — the project's first MCP server (`@modelcontextprotocol/sdk`), exposing `spec_consistency_check` as a model-callable tool over stdio. Agent-side auto-call (Planner/Architect mounting the skill via `--mcp-config`) is a follow-up — it needs a skill-kind discriminator in `skill.yaml`. |
 | **M2.a — Memory loop** ✅ | `@hira/memory` real implementation: zod-validated `MemoryRecord` (kind: adr/outcome/convention/glossary, tags, source.run_id), JSONL backend at `.hira/memory/records.jsonl`, keyword-search ranking with tag×3/title×2/body×1 weights. Runtime queries memory before the executor and injects `memory_context[]` into every task payload; Knowledge agent's prompt now cites `memory:<id>`. Memory Maintainer runs after the executor, emits `{records[]}` for the runtime to persist. New CLI: `hira memory list/show/query`. Decision on §12 #11 (memory granularity): automatic for ADRs + notable outcomes via the Maintainer's judgement; conventions and glossary entries stay manual until M2.b. |
 | **M2.b — Manual memory + scale switch** | `hira memory write` for explicit "remember this"; promote storage to SQLite + FTS5 (and later vector index) when JSONL recall degrades or volume crosses ~500 records. |
 | **M3 — Robust hand-offs** | Schema validation enforced both ways, journal replay command, budgets + rate-limit handling (§4.7), failure modes (timeout, malformed JSON reply, missing `claude` binary). |
@@ -696,10 +696,13 @@ runs:
     one. Auto-detection (e.g. infer `npm test` from `package.json`) and
     heavier tools (Semgrep / Schemathesis) can be layered on later but
     are deliberately not magic in v1.
-15. **Spec-consistency severity policy** (§4.8) — duplications and
-    coverage gaps are clearly blocking; "ambiguity" is judgement-heavy.
-    Decide what severities block dispatch vs. just warn the user once
-    we see real Run output.
+15. ~~**Spec-consistency severity policy**~~ — **resolved in M1.5.c-3.**
+    Structural defects (no tasks, empty description, unknown owner,
+    dangling dependency, cycle) are `blocker` and halt dispatch.
+    A new ADR overlapping a prior baseline decision is a `warning` —
+    surfaced, never blocking. Ambiguity detection is deliberately out
+    of scope: it needs model judgement, not a deterministic rule, so
+    it is left to the Planner's and Architect's own reasoning.
 16. ~~**Agent isolation from host Claude Code config**~~ — **resolved in
     M0.3.** Default `SessionInvocation.settingSources = []` plus a
     Hira-generated per-agent `settings.json` (empty `hooks`, allowlist

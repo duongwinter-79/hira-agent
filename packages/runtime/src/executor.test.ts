@@ -441,6 +441,71 @@ describe('Executor', () => {
     expect(out.executions[0]!.attempts).toBe(1);
     expect(out.executions.find((e) => e.task.id === 't2')!.status).toBe('completed');
   });
+
+  it('consistency gate blocks dispatch when the plan has an unknown owner', async () => {
+    const { journal, runId, projectRoot } = await newRun();
+    const { driver } = recordingDriver({ developer: '```json\n{"summary":"impl"}\n```' });
+    const bus = new Bus({
+      agents: [agent('developer')],
+      skills: [],
+      journal,
+      projectRoot,
+      driver,
+      binary: 'claude',
+    });
+    const exec = new Executor({
+      bus,
+      journal,
+      projectRoot,
+      wiredOwners: new Set(['developer']),
+      knownOwners: new Set(['developer', 'knowledge', 'solution-architect']),
+    });
+
+    const out = await exec.run({
+      runId,
+      parentHandoffId: 'p',
+      tasks: [
+        { id: 't1', description: 'do frontend', owner: 'frontend-wizard', depends_on: [] },
+        { id: 't2', description: 'implement', owner: 'developer', depends_on: ['t1'] },
+      ],
+    });
+
+    expect(out.consistency_blocked).toBe(true);
+    expect(out.consistency?.status).toBe('blocked');
+    const devExec = out.executions.find((e) => e.task.id === 't2');
+    expect(devExec!.status).toBe('skipped');
+    expect(devExec!.skip_reason).toMatch(/Consistency gate blocked/);
+  });
+
+  it('consistency gate passes a clean plan and lets the Developer run', async () => {
+    const { journal, runId, projectRoot } = await newRun();
+    const { driver } = recordingDriver({ developer: '```json\n{"summary":"impl"}\n```' });
+    const bus = new Bus({
+      agents: [agent('developer')],
+      skills: [],
+      journal,
+      projectRoot,
+      driver,
+      binary: 'claude',
+    });
+    const exec = new Executor({
+      bus,
+      journal,
+      projectRoot,
+      wiredOwners: new Set(['developer']),
+      knownOwners: new Set(['developer']),
+    });
+
+    const out = await exec.run({
+      runId,
+      parentHandoffId: 'p',
+      tasks: [{ id: 't1', description: 'implement', owner: 'developer', depends_on: [] }],
+    });
+
+    expect(out.consistency_blocked).toBeUndefined();
+    expect(out.consistency?.status).toBe('pass');
+    expect(out.executions[0]!.status).toBe('completed');
+  });
 });
 
 // Silence unused-import lint when no helper happens to use Handoff directly.

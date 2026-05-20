@@ -3,6 +3,12 @@ import type { Handoff, Journal, VerificationReport } from '@hira/journal';
 import type { MemoryRecord } from '@hira/memory';
 import { type Bus, type DispatchResult } from './bus.js';
 import { verifyDeveloperHandoff, type VerificationConfig } from './verification.js';
+import {
+  checkConsistency,
+  type BaselineAdr,
+  type ConsistencyAdr,
+  type ConsistencyReport,
+} from './consistency.js';
 
 /** Subset of the planner's task graph the executor walks. */
 export type PlannerTask = {
@@ -70,6 +76,14 @@ export type ExecutorConfig = {
    * the configured checks after each Developer hand-off. Null → `skipped`.
    */
   verificationConfig?: VerificationConfig | null;
+  /**
+   * Every known agent name. When provided, the Cross-Artifact Consistency
+   * gate (SPEC §4.8) runs before the first Developer task. Undefined → the
+   * gate is skipped.
+   */
+  knownOwners?: Set<string>;
+  /** Baseline `adr`-kind memory records, for the consistency gate's duplication check. */
+  baselineAdrs?: BaselineAdr[];
 };
 
 export type ExecutorInput = {
@@ -88,6 +102,14 @@ export type ExecutorOutput = {
    * hand-off (after retries). Downstream tasks were skipped.
    */
   gate_failed?: boolean;
+  /**
+   * Set when the Cross-Artifact Consistency gate blocked dispatch before
+   * the Developer task (SPEC §4.8). The Developer and downstream tasks
+   * were skipped.
+   */
+  consistency_blocked?: boolean;
+  /** The consistency gate's report, when the gate ran. */
+  consistency?: ConsistencyReport;
 };
 
 /**
@@ -113,13 +135,18 @@ export class Executor {
     }
 
     const executions: TaskExecution[] = [];
-    let gateFailed = false;
+    /** When set, every remaining task is skipped with this reason. */
+    let halt: string | undefined;
+    let verificationGateFailed = false;
+    let consistencyBlocked = false;
+    let consistencyChecked = false;
+    let consistencyReport: ConsistencyReport | undefined;
 
     for (const task of order.order) {
       const exec: TaskExecution = { task, status: 'skipped' };
 
-      if (gateFailed) {
-        exec.skip_reason = 'upstream Verification Engine gate failed';
+      if (halt) {
+        exec.skip_reason = halt;
         executions.push(exec);
         continue;
       }
@@ -129,6 +156,21 @@ export class Executor {
         continue;
       }
 
+      // Cross-Artifact Consistency gate (SPEC §4.8): runs once, before the
+      // first Developer task, over the task graph + the Architect's ADR +
+      // baseline memory. A `blocked` report halts dispatch.
+      if (task.owner === 'developer' && !consistencyChecked && this.cfg.knownOwners) {
+        consistencyChecked = true;
+        consistencyReport = await this.runConsistencyGate(input, executions);
+        if (consistencyReport.status === 'blocked') {
+          halt = 'Cross-Artifact Consistency gate blocked dispatch';
+          consistencyBlocked = true;
+          exec.skip_reason = halt;
+          executions.push(exec);
+          continue;
+        }
+      }
+
       const deps = task.depends_on
         .map((depId) => executions.find((e) => e.task.id === depId))
         .filter((e): e is TaskExecution => e !== undefined && e.status === 'completed');
@@ -136,7 +178,10 @@ export class Executor {
       if (task.owner === 'developer') {
         await this.runDeveloperTask(input, task, deps, exec);
         executions.push(exec);
-        if (exec.verification?.status === 'fail') gateFailed = true;
+        if (exec.verification?.status === 'fail') {
+          verificationGateFailed = true;
+          halt = 'upstream Verification Engine gate failed';
+        }
       } else {
         const { handoffId, result } = await this.dispatchTask(input, task, deps);
         exec.handoff_id = handoffId;
@@ -147,7 +192,43 @@ export class Executor {
       }
     }
 
-    return { executions, ...(gateFailed ? { gate_failed: true } : {}) };
+    return {
+      executions,
+      ...(verificationGateFailed ? { gate_failed: true } : {}),
+      ...(consistencyBlocked ? { consistency_blocked: true } : {}),
+      ...(consistencyReport ? { consistency: consistencyReport } : {}),
+    };
+  }
+
+  /**
+   * Run the Cross-Artifact Consistency check and journal it as a
+   * `consistency` artifact. Uses the Architect's ADR if one has completed.
+   */
+  private async runConsistencyGate(
+    input: ExecutorInput,
+    executions: TaskExecution[],
+  ): Promise<ConsistencyReport> {
+    const adrExec = executions.find(
+      (e) => e.task.owner === 'solution-architect' && e.status === 'completed',
+    );
+    const report = checkConsistency({
+      tasks: input.tasks.map((t) => ({
+        id: t.id,
+        description: t.description,
+        owner: t.owner,
+        depends_on: t.depends_on,
+      })),
+      adr: extractAdr(adrExec?.response),
+      baselineAdrs: this.cfg.baselineAdrs ?? [],
+      knownOwners: this.cfg.knownOwners ?? new Set(),
+    });
+    await this.cfg.journal.recordArtifact(
+      input.runId,
+      'consistency',
+      report,
+      input.parentHandoffId,
+    );
+    return report;
   }
 
   /**
@@ -249,6 +330,13 @@ export class Executor {
     }
     return this.cfg.toolsOverride;
   }
+}
+
+/** Project the Architect's ADR response into the consistency check's shape. */
+function extractAdr(response: unknown): ConsistencyAdr | null {
+  if (!response || typeof response !== 'object') return null;
+  const title = (response as { title?: unknown }).title;
+  return typeof title === 'string' ? { title } : null;
 }
 
 type TopoResult = { order: PlannerTask[] } | { error: string };
