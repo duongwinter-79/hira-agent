@@ -55,6 +55,22 @@ describe('Journal', () => {
     expect(await j.getRun('does-not-exist')).toBeUndefined();
   });
 
+  it('records an approval decision and surfaces it on the RunRecord', async () => {
+    const root = await tmpRoot();
+    const j = new Journal(root);
+    const run = await j.openRun('approve me');
+    await j.closeRun(run.id, 'succeeded');
+
+    let fetched = await j.getRun(run.id);
+    expect(fetched!.run.approval).toBeUndefined();
+
+    await j.recordApproval(run.id, 'approved');
+    fetched = await j.getRun(run.id);
+    expect(fetched!.run.approval).toBe('approved');
+    expect(fetched!.run.approved_at).toBeTruthy();
+    expect(fetched!.run.status).toBe('succeeded');
+  });
+
   it('lists runs newest first', async () => {
     const root = await tmpRoot();
     const j = new Journal(root);

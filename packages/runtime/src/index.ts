@@ -65,7 +65,42 @@ export type {
   PlannerTask,
   TaskExecution,
 } from './executor.js';
-export { verifyDeveloperHandoff } from './verification.js';
+export {
+  verifyDeveloperHandoff,
+  runVerificationEngine,
+  loadVerificationConfig,
+} from './verification.js';
+export type {
+  VerificationConfig,
+  VerificationCheck,
+  VerificationEngineOptions,
+} from './verification.js';
+
+export {
+  isGitRepo,
+  createRunWorktree,
+  runWorktreeSetup,
+  finalizeWorktree,
+  loadWorktreeSetupCommand,
+  deleteRunBranch,
+} from './worktree.js';
+export type { RunWorktree, WorktreeOutcome } from './worktree.js';
+
+export { buildRunTrace, traceArtifact } from './trace.js';
+export type { RunTrace, TracedTask, FramingHandoff, ArtifactTrace } from './trace.js';
+
+export { writeMemoryDelta, readMemoryDelta } from './delta.js';
+
+export { checkConsistency } from './consistency.js';
+export type {
+  ConsistencyReport,
+  ConsistencyIssue,
+  ConsistencySeverity,
+  ConsistencyTask,
+  ConsistencyAdr,
+  ConsistencyInput,
+  BaselineAdr,
+} from './consistency.js';
 
 export { MemoryStore, MemoryRecordSchema, NewMemoryRecordSchema, MemoryKindSchema } from '@hira/memory';
 export type { MemoryRecord, NewMemoryRecord, MemoryKind, MemorySource } from '@hira/memory';

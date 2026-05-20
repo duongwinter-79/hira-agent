@@ -200,12 +200,49 @@ hira run "<your message>"
 hira runs list
 hira runs show <run_id>
 
+# Trace a Run or an artifact, both directions (requirement ↔ task ↔ artifact).
+hira runs trace <run_id>
+hira runs trace <artifact_id>      # e.g. verification:1a2b3c4d:1
+
+# Approve a Run to fold its memory deltas into the baseline, or reject it.
+hira runs approve <run_id>
+hira runs reject <run_id>
+
+# Inspect the cross-Run memory store.
+hira memory list
+hira memory query "<keywords>"
+
 # See the assembled `claude` invocation without spawning it.
 hira run --dry-run "<message>"
 ```
 
 If you haven't linked it globally, prefix every command with
 `node packages/cli/dist/index.js`.
+
+---
+
+## Configuration
+
+An optional `hira.config.json` at the project root drives the
+deterministic Verification Engine. After a Developer hand-off the
+runtime runs each declared check and feeds the structured result into
+the Reviewer:
+
+```json
+{
+  "verification": {
+    "checks": [
+      { "name": "build", "command": "pnpm -r build", "timeout_ms": 180000 },
+      { "name": "test", "command": "pnpm -r test" }
+    ]
+  }
+}
+```
+
+Each check is a shell command run from the project root; a non-zero
+exit marks the stage `fail`. With no `hira.config.json` the engine
+reports `skipped` — there is no auto-detection, the checks are exactly
+what you declare.
 
 ---
 

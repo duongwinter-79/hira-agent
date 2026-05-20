@@ -62,12 +62,19 @@ export type Handoff = z.infer<typeof HandoffSchema>;
 
 export type RunStatus = 'running' | 'succeeded' | 'failed' | 'cancelled';
 
+/** Post-Run user decision (SPEC §4.8 delta state machine). */
+export type RunApproval = 'approved' | 'rejected';
+
 export type RunRecord = {
   id: string;
   intent_message: string;
   started_at: string;
   ended_at?: string;
   status: RunStatus;
+  /** Set once the user approves or rejects the Run's deltas. */
+  approval?: RunApproval;
+  /** ISO timestamp of the approval decision. */
+  approved_at?: string;
 };
 
 export type HandoffStatus = 'pending' | 'in_progress' | 'completed' | 'failed';

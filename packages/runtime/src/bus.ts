@@ -45,13 +45,19 @@ export type DispatchResult = {
 export type DispatchOptions = {
   /**
    * Override the target agent's manifest tool allowlist for this single
-   * dispatch. Used by the Executor in M1.3 to keep specialist runs
-   * read-only until the deterministic Verification Engine lands (M1.5).
+   * dispatch. Used by the Executor to keep most specialists read-only
+   * while giving the Developer real Edit/Write/Bash inside its worktree.
    *
    * The override REPLACES the manifest list — pass `[]` to disable every
-   * built-in tool.
+   * built-in tool. Omit to use the manifest's tools verbatim.
    */
   tools?: string[];
+  /**
+   * Override the working directory for this single dispatch. Used by the
+   * Executor to run worktree-scoped agents (Developer / Tester / Reviewer)
+   * inside `.hira/runs/<run_id>/worktree/` instead of the project root.
+   */
+  cwd?: string;
 };
 
 /**
@@ -81,6 +87,7 @@ export class Bus {
     const systemPrompt = composeSystemPrompt(target.systemPrompt, behavioural);
 
     const allowedTools = options.tools ?? target.manifest.tools;
+    const cwd = options.cwd ?? this.cfg.projectRoot;
 
     const runDir = this.cfg.journal.runDir(envelope.run_id);
     const isolation = await prepareAgentIsolation({
@@ -97,7 +104,7 @@ export class Bus {
       systemPrompt,
       allowedTools,
       permissionMode: 'acceptEdits',
-      cwd: this.cfg.projectRoot,
+      cwd,
       sessionId: randomUUID(),
       noSessionPersistence: true,
       outputFormat: 'stream-json',

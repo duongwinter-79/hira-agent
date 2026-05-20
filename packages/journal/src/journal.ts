@@ -5,6 +5,7 @@ import type {
   Handoff,
   HandoffRecord,
   HandoffStatus,
+  RunApproval,
   RunRecord,
   RunStatus,
   Artifact,
@@ -25,8 +26,9 @@ type JournalEvent =
       exit_code?: number;
       stderr_excerpt?: string;
     }
-  | { t: 'artifact_recorded'; run_id: string } & Artifact
-  | { t: 'run_closed'; run_id: string; ended_at: string; status: RunStatus };
+  | ({ t: 'artifact_recorded'; run_id: string } & Artifact)
+  | { t: 'run_closed'; run_id: string; ended_at: string; status: RunStatus }
+  | { t: 'run_approval'; run_id: string; decision: RunApproval; at: string };
 
 /**
  * Append-only JSONL journal at `.hira/runs/<run_id>/journal.jsonl`.
@@ -121,6 +123,16 @@ export class Journal {
     });
   }
 
+  /** Record the user's approve/reject decision for a Run (SPEC §4.8). */
+  async recordApproval(runId: string, decision: RunApproval): Promise<void> {
+    await this.append(runId, {
+      t: 'run_approval',
+      run_id: runId,
+      decision,
+      at: new Date().toISOString(),
+    });
+  }
+
   async listRuns(limit = 50): Promise<RunRecord[]> {
     const entries = await safeReaddir(this.runsRoot);
     const runs: RunRecord[] = [];
@@ -184,6 +196,8 @@ function projectRun(events: JournalEvent[]): RunRecord | undefined {
       };
     } else if (e.t === 'run_closed' && run) {
       run = { ...run, ended_at: e.ended_at, status: e.status };
+    } else if (e.t === 'run_approval' && run) {
+      run = { ...run, approval: e.decision, approved_at: e.at };
     }
   }
   return run;
