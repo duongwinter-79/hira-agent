@@ -47,6 +47,13 @@ const WIRED_OWNERS = new Set<string>([
 ]);
 
 /**
+ * Owners whose results may be reused on resume (SPEC M1.4). Their output is
+ * self-contained — no filesystem side effects. Developer / Tester / Reviewer
+ * touch the worktree, whose state is lost on a crash, so they always re-run.
+ */
+const RESUMABLE_OWNERS = new Set<string>(['knowledge', 'solution-architect']);
+
+/**
  * Tool override for specialist invocations. M1.3 keeps every specialist
  * read-only until the deterministic Verification Engine lands in M1.5.
  * Developer / Tester's manifest Edit/Write/Bash entries are intentionally
@@ -142,10 +149,6 @@ program
         binary: opts.binary,
       });
 
-      // Declared outside the try so the catch can clean up a worktree
-      // left behind by a crash mid-Run.
-      let worktree: RunWorktree | undefined;
-
       try {
         // Hand-off 1: user → orchestrator (intent classification).
         const orcEnvelope: Handoff = {
@@ -218,147 +221,22 @@ program
           return;
         }
 
-        // Query memory for context relevant to this Run, inject into each
-        // task's payload as `memory_context`. Specialists (especially
-        // Knowledge) cite by `memory:<id>` when they build on prior facts.
-        const memory = new MemoryStore(project);
-        const memoryContext = await memory.query(message, 5);
-        const tasksWithMemory: PlannerTask[] = tasks.map((t) => ({ ...t }));
-
-        // Load the deterministic Verification Engine config (SPEC §4.8).
-        // Absent hira.config.json → engine reports `skipped`.
-        const verificationConfig = await loadVerificationConfig(project);
-
-        // If the plan implements code, create an isolated git worktree so
-        // the Developer edits for real without touching the main checkout
-        // (SPEC §4.8). Non-git projects degrade to read-only dry mode.
-        if (tasks.some((t) => t.owner === 'developer') && (await isGitRepo(project))) {
-          worktree = await createRunWorktree(project, run.id);
-          process.stderr.write(`(worktree: ${worktree.branch})\n`);
-          const setupCmd = await loadWorktreeSetupCommand(project);
-          if (setupCmd) {
-            const setup = await runWorktreeSetup(worktree.path, setupCmd);
-            if (!setup.ok) {
-              process.stderr.write(
-                `(warning: worktree setup '${setupCmd}' failed; verification may not run)\n`,
-              );
-            }
-          }
-        }
-
-        // Baseline ADRs for the Cross-Artifact Consistency gate (SPEC §4.8).
-        const baselineAdrs = (await memory.list({ kind: 'adr' })).map((r) => ({
-          id: r.id,
-          title: r.title,
-          tags: r.tags,
-        }));
-
-        // Walk the task graph through wired specialists.
-        const executor = new Executor({
-          bus,
+        // Run the post-plan pipeline (memory → executor → maintainer →
+        // synthesis). Shared with `hira runs resume`.
+        await runPipeline({
+          project,
+          binary: opts.binary,
+          agents,
+          skills,
           journal,
-          projectRoot: project,
-          wiredOwners: WIRED_OWNERS,
-          toolsOverride: SPECIALIST_READ_ONLY_TOOLS,
-          memoryContext,
-          verificationConfig,
-          knownOwners: new Set(agents.map((a) => a.manifest.name)),
-          baselineAdrs,
-          ...(worktree ? { worktree: { path: worktree.path } } : {}),
-        });
-        const execOut = await executor.run({
-          runId: run.id,
-          parentHandoffId: planEnvelope.handoff_id,
-          tasks: tasksWithMemory,
-        });
-
-        if (execOut.graph_error) {
-          if (worktree) await finalizeWorktree(project, worktree).catch(() => undefined);
-          await fail(journal, run.id, `Planner produced an invalid task graph: ${execOut.graph_error}`);
-          return;
-        }
-
-        // Commit the Developer's worktree changes to its branch and remove
-        // the worktree directory. The branch persists for inspection.
-        let worktreeOutcome: WorktreeOutcome | undefined;
-        if (worktree) {
-          worktreeOutcome = await finalizeWorktree(project, worktree);
-          if (worktreeOutcome.committed) {
-            process.stderr.write(
-              `(worktree: ${worktreeOutcome.changedFiles} file(s) committed to ${worktreeOutcome.branch})\n`,
-            );
-          } else {
-            process.stderr.write(`(worktree: no file changes on ${worktreeOutcome.branch})\n`);
-          }
-        }
-
-        // Memory Maintainer: read the chain and stage proposed records as
-        // this Run's memory delta (folded into baseline by `hira runs approve`).
-        const newRecords = await runMemoryMaintainer({
           bus,
-          journal,
-          runDir: journal.runDir(run.id),
           runId: run.id,
-          parentHandoffId: planEnvelope.handoff_id,
           intent: message,
-          plan: planResult.response,
-          executions: execOut.executions,
+          planHandoffId: planEnvelope.handoff_id,
+          planResponse: planResult.response,
+          tasks,
         });
-
-        // Synthesis: hand back to the orchestrator with the full chain so
-        // it can compose a user-facing reply.
-        const synthEnvelope: Handoff = {
-          run_id: run.id,
-          handoff_id: randomUUID(),
-          parent_handoff_id: planEnvelope.handoff_id,
-          from: 'user',
-          to: 'orchestrator',
-          kind: 'response',
-          payload: {
-            message: buildSynthesisPrompt(
-              message,
-              run.id,
-              planResult.response,
-              execOut.executions,
-              memoryContext,
-              newRecords,
-              {
-                gateFailed: execOut.gate_failed ?? false,
-                worktree: worktreeOutcome,
-                consistency: execOut.consistency,
-              },
-            ),
-          },
-          artifacts: [],
-          delta_refs: [],
-        };
-        const synthResult = await bus.dispatch(synthEnvelope);
-
-        if (synthResult.exitCode !== 0) {
-          await fail(
-            journal,
-            run.id,
-            `orchestrator (synthesis) exited with code ${synthResult.exitCode}`,
-            synthResult.stderrExcerpt,
-          );
-          return;
-        }
-
-        const synthDecision = parseDecision(synthResult);
-        const summary =
-          synthDecision?.action === 'reply'
-            ? synthDecision.message
-            : synthResult.responseText;
-        process.stdout.write(summary.trimEnd() + '\n');
-        if (synthDecision?.action !== 'reply') {
-          process.stderr.write(
-            `(warning: orchestrator synthesis returned no parseable {action:'reply'} block)\n`,
-          );
-        }
-        await journal.closeRun(run.id, 'succeeded');
-        console.error(`(run_id: ${run.id})`);
       } catch (err) {
-        if (worktree) await finalizeWorktree(project, worktree).catch(() => undefined);
         await journal.closeRun(run.id, 'failed').catch(() => undefined);
         throw err;
       }
@@ -433,6 +311,19 @@ runs
         console.log(
           `      reply: ${oneLine.length > 100 ? oneLine.slice(0, 97) + '...' : oneLine}`,
         );
+      }
+      if (h.progress && h.progress.length > 0) {
+        const last = h.progress[h.progress.length - 1]!;
+        console.log(
+          `      progress: ${h.progress.length} event(s), last: ${last.phase}${last.detail ? ` ${last.detail}` : ''}`,
+        );
+        // For a hand-off that never completed (a crash), show the trail so
+        // the user can see exactly how far the agent got.
+        if (h.status === 'in_progress') {
+          for (const p of h.progress.slice(-8)) {
+            console.log(`        · ${p.phase}${p.detail ? ` — ${p.detail}` : ''}`);
+          }
+        }
       }
     }
     if (artifacts.length > 0) {
@@ -605,6 +496,93 @@ runs
         : `  No worktree branch ${branch} to delete.`,
     );
   });
+
+runs
+  .command('resume')
+  .description('Resume an interrupted Run, reusing completed research/design (SPEC M1.4)')
+  .argument('<run_id>', 'a run id or unique prefix')
+  .option('--project <path>', 'project root', process.cwd())
+  .option(
+    '--plugins-root <path>',
+    'where to load agents+skills from (default: Hira install dir; env: HIRA_PLUGINS_ROOT)',
+  )
+  .option('--binary <path>', 'path to the claude CLI binary', 'claude')
+  .action(
+    async (runId: string, opts: { project: string; pluginsRoot?: string; binary: string }) => {
+      const project = resolve(opts.project);
+      const journal = new Journal(project);
+
+      const run = await resolveRun(journal, runId);
+      if (!run) {
+        console.error(`run not found: ${runId}`);
+        process.exit(1);
+      }
+      if (run.status === 'succeeded') {
+        console.error(`Run ${run.id} already succeeded; nothing to resume.`);
+        process.exit(1);
+      }
+      if (run.approval) {
+        console.error(`Run ${run.id} already has a decision (${run.approval}); cannot resume.`);
+        process.exit(1);
+      }
+
+      const data = await journal.getRun(run.id);
+      if (!data) {
+        console.error(`run not found: ${run.id}`);
+        process.exit(1);
+      }
+
+      // Reconstruct the plan from the original Planner hand-off.
+      const planHandoff = data.handoffs.find(
+        (h) => h.to === 'planner' && h.status === 'completed',
+      );
+      if (!planHandoff) {
+        console.error(
+          `Run ${run.id} has no completed plan to resume from. Run it again from scratch.`,
+        );
+        process.exit(1);
+      }
+      const tasks = parseTasks(planHandoff.response);
+      if (tasks === null) {
+        console.error(`Run ${run.id}'s recorded plan is unparseable. Run it again from scratch.`);
+        process.exit(1);
+      }
+
+      // Reuse completed self-contained task results (Knowledge, Architect).
+      // Worktree-touching owners always re-run — their filesystem state is gone.
+      const priorResults = new Map<string, { response: unknown; responseText: string }>();
+      for (const h of data.handoffs) {
+        if (h.task_id && h.status === 'completed' && RESUMABLE_OWNERS.has(h.to)) {
+          priorResults.set(h.task_id, {
+            response: h.response,
+            responseText: h.response_text ?? '',
+          });
+        }
+      }
+
+      const { agents, skills } = await loadPlugins(resolvePluginsRoot(opts.pluginsRoot));
+      const driver = new SessionDriver();
+      const bus = new Bus({ agents, skills, journal, projectRoot: project, driver, binary: opts.binary });
+
+      process.stderr.write(
+        `(resume: ${run.id} — ${tasks.length} task(s), ${priorResults.size} reusable)\n`,
+      );
+      await runPipeline({
+        project,
+        binary: opts.binary,
+        agents,
+        skills,
+        journal,
+        bus,
+        runId: run.id,
+        intent: run.intent_message,
+        planHandoffId: planHandoff.handoff_id,
+        planResponse: planHandoff.response,
+        tasks,
+        priorResults,
+      });
+    },
+  );
 
 // ---------- memory ----------
 
@@ -802,6 +780,165 @@ function parseTasks(response: unknown): PlannerTask[] | null {
     tasks.push({ id: t.id, description: t.description, owner: t.owner, depends_on: t.depends_on });
   }
   return tasks;
+}
+
+type PipelineArgs = {
+  project: string;
+  binary: string;
+  agents: LoadedAgent[];
+  skills: LoadedSkill[];
+  journal: Journal;
+  bus: Bus;
+  runId: string;
+  intent: string;
+  /** Hand-off id of the Planner invocation — parent of the executor tasks. */
+  planHandoffId: string;
+  /** The Planner's raw response, passed to the Memory Maintainer + synthesis. */
+  planResponse: unknown;
+  tasks: PlannerTask[];
+  /** Task results carried over from a prior Run (resume — SPEC M1.4). */
+  priorResults?: Map<string, { response: unknown; responseText: string }>;
+};
+
+/**
+ * The post-plan Run pipeline: memory query → worktree → executor →
+ * verification → memory delta → synthesis. Shared by `hira run` and
+ * `hira runs resume`. Owns the worktree lifecycle and closes the Run.
+ */
+async function runPipeline(args: PipelineArgs): Promise<void> {
+  const { project, journal, bus, runId, intent, planHandoffId, planResponse, tasks } = args;
+  let worktree: RunWorktree | undefined;
+
+  try {
+    const memory = new MemoryStore(project);
+    const memoryContext = await memory.query(intent, 5);
+    const verificationConfig = await loadVerificationConfig(project);
+
+    // If the plan implements code, create an isolated git worktree so the
+    // Developer edits for real without touching the main checkout (§4.8).
+    if (tasks.some((t) => t.owner === 'developer') && (await isGitRepo(project))) {
+      worktree = await createRunWorktree(project, runId);
+      process.stderr.write(`(worktree: ${worktree.branch})\n`);
+      const setupCmd = await loadWorktreeSetupCommand(project);
+      if (setupCmd) {
+        const setup = await runWorktreeSetup(worktree.path, setupCmd);
+        if (!setup.ok) {
+          process.stderr.write(
+            `(warning: worktree setup '${setupCmd}' failed; verification may not run)\n`,
+          );
+        }
+      }
+    }
+
+    const baselineAdrs = (await memory.list({ kind: 'adr' })).map((r) => ({
+      id: r.id,
+      title: r.title,
+      tags: r.tags,
+    }));
+
+    const executor = new Executor({
+      bus,
+      journal,
+      projectRoot: project,
+      wiredOwners: WIRED_OWNERS,
+      toolsOverride: SPECIALIST_READ_ONLY_TOOLS,
+      memoryContext,
+      verificationConfig,
+      knownOwners: new Set(args.agents.map((a) => a.manifest.name)),
+      baselineAdrs,
+      ...(args.priorResults ? { priorResults: args.priorResults } : {}),
+      ...(worktree ? { worktree: { path: worktree.path } } : {}),
+    });
+    const execOut = await executor.run({ runId, parentHandoffId: planHandoffId, tasks });
+
+    if (execOut.graph_error) {
+      if (worktree) await finalizeWorktree(project, worktree).catch(() => undefined);
+      await fail(journal, runId, `Planner produced an invalid task graph: ${execOut.graph_error}`);
+      return;
+    }
+
+    const reused = execOut.executions.filter((e) => e.resumed).length;
+    if (reused > 0) {
+      process.stderr.write(`(resume: reused ${reused} prior task result(s))\n`);
+    }
+
+    // Commit the Developer's worktree changes to its branch; remove the dir.
+    let worktreeOutcome: WorktreeOutcome | undefined;
+    if (worktree) {
+      worktreeOutcome = await finalizeWorktree(project, worktree);
+      process.stderr.write(
+        worktreeOutcome.committed
+          ? `(worktree: ${worktreeOutcome.changedFiles} file(s) committed to ${worktreeOutcome.branch})\n`
+          : `(worktree: no file changes on ${worktreeOutcome.branch})\n`,
+      );
+    }
+
+    // Memory Maintainer stages proposed records as this Run's delta.
+    const newRecords = await runMemoryMaintainer({
+      bus,
+      journal,
+      runDir: journal.runDir(runId),
+      runId,
+      parentHandoffId: planHandoffId,
+      intent,
+      plan: planResponse,
+      executions: execOut.executions,
+    });
+
+    // Synthesis: the orchestrator composes the user-facing reply.
+    const synthEnvelope: Handoff = {
+      run_id: runId,
+      handoff_id: randomUUID(),
+      parent_handoff_id: planHandoffId,
+      from: 'user',
+      to: 'orchestrator',
+      kind: 'response',
+      payload: {
+        message: buildSynthesisPrompt(
+          intent,
+          runId,
+          planResponse,
+          execOut.executions,
+          memoryContext,
+          newRecords,
+          {
+            gateFailed: execOut.gate_failed ?? false,
+            worktree: worktreeOutcome,
+            consistency: execOut.consistency,
+          },
+        ),
+      },
+      artifacts: [],
+      delta_refs: [],
+    };
+    const synthResult = await bus.dispatch(synthEnvelope);
+
+    if (synthResult.exitCode !== 0) {
+      await fail(
+        journal,
+        runId,
+        `orchestrator (synthesis) exited with code ${synthResult.exitCode}`,
+        synthResult.stderrExcerpt,
+      );
+      return;
+    }
+
+    const synthDecision = parseDecision(synthResult);
+    const summary =
+      synthDecision?.action === 'reply' ? synthDecision.message : synthResult.responseText;
+    process.stdout.write(summary.trimEnd() + '\n');
+    if (synthDecision?.action !== 'reply') {
+      process.stderr.write(
+        `(warning: orchestrator synthesis returned no parseable {action:'reply'} block)\n`,
+      );
+    }
+    await journal.closeRun(runId, 'succeeded');
+    console.error(`(run_id: ${runId})`);
+  } catch (err) {
+    if (worktree) await finalizeWorktree(project, worktree).catch(() => undefined);
+    await journal.closeRun(runId, 'failed').catch(() => undefined);
+    throw err;
+  }
 }
 
 function buildSynthesisPrompt(

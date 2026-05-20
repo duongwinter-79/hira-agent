@@ -208,6 +208,9 @@ hira runs trace <artifact_id>      # e.g. verification:1a2b3c4d:1
 hira runs approve <run_id>
 hira runs reject <run_id>
 
+# Resume an interrupted Run — reuses completed research/design, re-runs the rest.
+hira runs resume <run_id>
+
 # Inspect the cross-Run memory store.
 hira memory list
 hira memory query "<keywords>"

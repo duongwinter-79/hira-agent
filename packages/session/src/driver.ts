@@ -36,7 +36,15 @@ export class SessionDriver {
     return { binary, args, display: shellQuote([binary, ...args]) };
   }
 
-  async run(inv: SessionInvocation): Promise<SessionResult> {
+  /**
+   * Spawn the agent and run it to completion. `onEvent`, when supplied, is
+   * called for every parsed stream-json event as it arrives — used to
+   * stream live progress into the journal.
+   */
+  async run(
+    inv: SessionInvocation,
+    onEvent?: (event: StreamEvent) => void,
+  ): Promise<SessionResult> {
     const { binary, args } = buildArgs(inv);
 
     const child = spawn(binary, args, {
@@ -74,6 +82,7 @@ export class SessionDriver {
         if (typeof event.result === 'string') resultText = event.result;
         if (event.session_id) sessionId = event.session_id;
       }
+      onEvent?.(event);
     });
 
     child.stderr.on('data', (chunk: Buffer) => {

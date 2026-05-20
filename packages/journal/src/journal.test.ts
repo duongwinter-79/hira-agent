@@ -49,6 +49,41 @@ describe('Journal', () => {
     expect(fetched!.handoffs[0]!.response_text).toBe('ok');
   });
 
+  it('streams live progress entries onto a hand-off', async () => {
+    const root = await tmpRoot();
+    const j = new Journal(root);
+    const run = await j.openRun('progress test');
+    const h = makeHandoff(run.id);
+    await j.recordHandoffStart(h);
+
+    // Fire progress events unawaited — the write queue must serialise them.
+    void j.recordHandoffProgress(run.id, h.handoff_id, 'started', 'sess-x');
+    void j.recordHandoffProgress(run.id, h.handoff_id, 'tool', 'Read');
+    void j.recordHandoffProgress(run.id, h.handoff_id, 'message', 'thinking about it');
+    await j.completeHandoff(run.id, h.handoff_id, { status: 'completed' });
+
+    const fetched = await j.getRun(run.id);
+    const progress = fetched!.handoffs[0]!.progress;
+    expect(progress).toHaveLength(3);
+    expect(progress!.map((p) => p.phase)).toEqual(['started', 'tool', 'message']);
+    expect(progress![1]!.detail).toBe('Read');
+  });
+
+  it('keeps progress on a hand-off that never completed (crash)', async () => {
+    const root = await tmpRoot();
+    const j = new Journal(root);
+    const run = await j.openRun('crash test');
+    const h = makeHandoff(run.id);
+    await j.recordHandoffStart(h);
+    await j.recordHandoffProgress(run.id, h.handoff_id, 'tool', 'Grep');
+    // No completeHandoff — simulates a crash mid-hand-off.
+
+    const fetched = await j.getRun(run.id);
+    expect(fetched!.handoffs[0]!.status).toBe('in_progress');
+    expect(fetched!.handoffs[0]!.progress).toHaveLength(1);
+    expect(fetched!.handoffs[0]!.progress![0]!.phase).toBe('tool');
+  });
+
   it('returns undefined for unknown run ids', async () => {
     const root = await tmpRoot();
     const j = new Journal(root);
