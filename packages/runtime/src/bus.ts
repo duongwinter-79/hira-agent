@@ -14,7 +14,9 @@ import {
   type SessionResult,
   type StreamEvent,
 } from '@hira/session';
+import Ajv, { type ValidateFunction } from 'ajv';
 import { extractFencedJson } from './fence.js';
+import { BudgetTracker } from './budget.js';
 
 /**
  * Minimal driver surface the Bus depends on. The real implementation is
@@ -45,13 +47,23 @@ export type BusConfig = {
    * Undefined → MCP skills are silently inert.
    */
   mcpSkillsServerPath?: string;
+  /**
+   * Per-Run budget tracker (SPEC §9). Bus calls `check()` before every
+   * dispatch and `recordHandoff()` after a successful send. Undefined →
+   * no per-Run caps enforced.
+   */
+  budget?: BudgetTracker;
 };
 
 /** Name of Hira's built-in MCP server, as it appears in mcp.json. */
 const HIRA_MCP_SERVER = 'hira-skills';
 
 export type DispatchResult = {
-  /** Parsed fenced JSON from the agent's reply, or null if none found / malformed. */
+  /**
+   * Parsed fenced JSON from the agent's reply, or null when no fenced block
+   * was found, the JSON was malformed, OR it failed `outputs.schema`
+   * validation (in which case `schemaError` is set).
+   */
   response: unknown | null;
   /** Full assistant text (includes the fenced block). */
   responseText: string;
@@ -61,6 +73,12 @@ export type DispatchResult = {
   exitCode: number;
   /** Excerpt of stderr (first 2 KB) on failures, undefined otherwise. */
   stderrExcerpt?: string;
+  /**
+   * Schema-validation error when the agent's `response` failed its
+   * declared `outputs.schema`. The hand-off completed cleanly otherwise;
+   * the response was discarded.
+   */
+  schemaError?: string;
 };
 
 export type DispatchOptions = {
@@ -95,9 +113,17 @@ export type DispatchOptions = {
  * limited to the targets in their manifest's `escalates_to`.
  */
 export class Bus {
-  constructor(private readonly cfg: BusConfig) {}
+  private readonly ajv: Ajv;
+  private readonly validators = new Map<string, ValidateFunction>();
+
+  constructor(private readonly cfg: BusConfig) {
+    this.ajv = new Ajv({ allErrors: false, strict: false });
+  }
 
   async dispatch(envelope: Handoff, options: DispatchOptions = {}): Promise<DispatchResult> {
+    // Per-Run budget check (SPEC §9). Throws BudgetExhausted if a cap is hit.
+    this.cfg.budget?.check();
+
     const target = this.cfg.agents.find((a) => a.manifest.name === envelope.to);
     if (!target) {
       throw new Error(`Bus: unknown target agent '${envelope.to}'`);
@@ -170,8 +196,24 @@ export class Bus {
       onEvent,
     );
 
-    const response = extractFencedJson(result.text);
+    this.cfg.budget?.recordHandoff();
+
+    const rawResponse = extractFencedJson(result.text);
     const stderrExcerpt = result.stderr.slice(0, 2048) || undefined;
+
+    // Validate against the target's outputs.schema (SPEC M3.a). On
+    // failure the response is discarded (null) and the error is journaled
+    // so `runs show` surfaces it — same tolerant convention as malformed
+    // JSON, just with a precise message.
+    let response = rawResponse;
+    let schemaError: string | undefined;
+    if (rawResponse !== null && target.outputSchema) {
+      const validate = this.validatorFor(target.manifest.name, target.outputSchema);
+      if (!validate(rawResponse)) {
+        schemaError = formatAjvErrors(validate.errors);
+        response = null;
+      }
+    }
 
     await this.cfg.journal.completeHandoff(envelope.run_id, envelope.handoff_id, {
       status: result.exitCode === 0 ? 'completed' : 'failed',
@@ -180,6 +222,7 @@ export class Bus {
       response_text: result.text,
       exit_code: result.exitCode,
       stderr_excerpt: stderrExcerpt,
+      ...(schemaError !== undefined ? { schema_error: schemaError } : {}),
     });
 
     return {
@@ -188,7 +231,18 @@ export class Bus {
       sessionId: result.sessionId,
       exitCode: result.exitCode,
       stderrExcerpt,
+      ...(schemaError !== undefined ? { schemaError } : {}),
     };
+  }
+
+  /** Cached schema validator per agent (compile once per Bus instance). */
+  private validatorFor(agentName: string, schema: unknown): ValidateFunction {
+    let v = this.validators.get(agentName);
+    if (!v) {
+      v = this.ajv.compile(schema as object);
+      this.validators.set(agentName, v);
+    }
+    return v;
   }
 
   private checkEscalation(from: string, to: string): void {
@@ -259,4 +313,15 @@ function deriveProgress(event: StreamEvent): { phase: string; detail?: string } 
     }
   }
   return null;
+}
+
+/** Render Ajv's error array into a short, actionable one-line message. */
+function formatAjvErrors(errors: ValidateFunction['errors']): string {
+  if (!errors || errors.length === 0) return 'schema validation failed';
+  const parts = errors.slice(0, 3).map((e) => {
+    const where = e.instancePath || '/';
+    return `${where} ${e.message ?? 'invalid'}`;
+  });
+  const more = errors.length > 3 ? ` (+${errors.length - 3} more)` : '';
+  return parts.join('; ') + more;
 }

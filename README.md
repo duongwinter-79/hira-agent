@@ -238,14 +238,24 @@ the Reviewer:
       { "name": "build", "command": "pnpm -r build", "timeout_ms": 180000 },
       { "name": "test", "command": "pnpm -r test" }
     ]
+  },
+  "budgets": {
+    "per_run": {
+      "max_handoffs": 30,
+      "max_wall_clock_s": 900
+    }
   }
 }
 ```
 
-Each check is a shell command run from the project root; a non-zero
-exit marks the stage `fail`. With no `hira.config.json` the engine
-reports `skipped` — there is no auto-detection, the checks are exactly
-what you declare.
+Each verification check is a shell command run from the project root;
+a non-zero exit marks the stage `fail`. With no `hira.config.json` the
+engine reports `skipped` — there is no auto-detection, the checks are
+exactly what you declare.
+
+`budgets.per_run` is optional; both fields are independently optional.
+The Bus checks the tracker before every dispatch — exceeding either
+cap halts the Run cleanly with a `BudgetExhausted` message.
 
 ---
 

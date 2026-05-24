@@ -73,6 +73,48 @@ describe('loadPlugins', () => {
     expect(plugins.skills).toEqual([]);
   });
 
+  it("reads an agent's outputs.schema into LoadedAgent.outputSchema", async () => {
+    const root = await makeRoot();
+    await writeAgent(
+      root,
+      'planner',
+      [
+        'name: planner',
+        'version: 0.0.1',
+        'kind: agent',
+        'prompt: ./system.md',
+        'outputs:',
+        '  schema: ./outputs.schema.json',
+        'escalates_to: []',
+      ].join('\n'),
+    );
+    const dir = join(root, 'plugins', 'agents', 'planner');
+    await writeFile(
+      join(dir, 'outputs.schema.json'),
+      JSON.stringify({ type: 'object', required: ['tasks'] }),
+    );
+    const plugins = await loadPlugins(root);
+    expect(plugins.agents[0]!.outputSchema).toEqual({ type: 'object', required: ['tasks'] });
+  });
+
+  it('rejects an agent whose outputs.schema file is missing', async () => {
+    const root = await makeRoot();
+    await writeAgent(
+      root,
+      'planner',
+      [
+        'name: planner',
+        'version: 0.0.1',
+        'kind: agent',
+        'prompt: ./system.md',
+        'outputs:',
+        '  schema: ./outputs.schema.json',
+        'escalates_to: []',
+      ].join('\n'),
+    );
+    await expect(loadPlugins(root)).rejects.toThrow(/outputs\.schema.*missing/);
+  });
+
   it('parses a skill manifest with an mcp block', async () => {
     const root = await makeRoot();
     const dir = join(root, 'plugins', 'skills', 'spec-consistency');

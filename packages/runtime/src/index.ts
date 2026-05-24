@@ -94,6 +94,9 @@ export type { RunTrace, TracedTask, FramingHandoff, ArtifactTrace } from './trac
 
 export { writeMemoryDelta, readMemoryDelta } from './delta.js';
 
+export { BudgetTracker, BudgetExhausted, loadBudgetConfig } from './budget.js';
+export type { Budget } from './budget.js';
+
 export { checkConsistency } from './consistency.js';
 export type {
   ConsistencyReport,

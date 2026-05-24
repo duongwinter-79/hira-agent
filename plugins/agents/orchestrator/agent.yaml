@@ -2,6 +2,8 @@ name: orchestrator
 version: 0.0.1
 kind: agent
 prompt: ./system.md
+outputs:
+  schema: ./outputs.schema.json
 tools: []
 escalates_to:
   - planner

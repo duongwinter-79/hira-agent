@@ -712,6 +712,7 @@ runs:
 | **M1.5.c-1 — Traceability view** ✅ | `buildRunTrace` re-projects the journal into a `RunTrace` (Planner task graph annotated with each task's hand-off, status, retry count, and artifacts; framing hand-offs separated out). `traceArtifact` walks a DAG: backward from an artifact to the requirements that produced it, forward to the tasks that consumed it. `hira runs trace <run_id>` renders the task chain; `hira runs trace <artifact_id>` renders the bidirectional walk (§4.9). |
 | **M1.5.c-2 — Spec/ADR delta state machine** ✅ | The Memory Maintainer no longer auto-writes baseline. Its proposed records (ADRs + outcomes) are staged as a *delta* in `.hira/runs/<run_id>/deltas/memory.json` (`@hira/runtime/delta.ts`). `hira runs approve <run_id>` folds the delta into the baseline memory store and records the decision in the journal; `hira runs reject` records rejection and deletes the Run's worktree branch. Decisions are immutable. The journal carries an `approval` field per Run, surfaced in `runs list` / `runs show`. Code-as-delta stays the worktree branch from M1.5.b — `approve` reports it for `git merge` rather than auto-merging. Failed/unapproved Runs leave the baseline untouched (§4.8). |
 | **M1.5.c-3 — spec-consistency check + first MCP server** ✅ | `checkConsistency` (`@hira/runtime/consistency.ts`) — deterministic Cross-Artifact Consistency check (SPEC §4.8): structural blockers (no tasks, empty description, unknown owner, dangling dependency, cycle) + memory-overlap warnings. The Executor runs it as a gate before the first Developer task; a `blocked` report halts dispatch and skips the Developer + downstream. `@hira/mcp-skills` — the project's first MCP server (`@modelcontextprotocol/sdk`), exposing `spec_consistency_check` as a model-callable tool over stdio. *(Agent-side auto-call landed in the MCP auto-call slice below.)* |
+| **M3.a — Schema validation + per-Run budgets** ✅ | Every built-in agent now ships an `outputs.schema.json`; `agent.yaml` points at it via `outputs.schema`. The plugin-loader reads + parses the schema; the Bus compiles it (Ajv, cached per Bus) and validates the agent's fenced-JSON reply. Validation failure → response becomes `null`, the error is journaled as `handoff_completed.schema_error`, and `hira runs show` displays it. Per-Run budgets (`budgets.per_run.{max_handoffs,max_wall_clock_s}` in `hira.config.json`) load into a `BudgetTracker` that the Bus consults before each dispatch; a hit throws `BudgetExhausted`, which the pipeline catches to close the Run failed with a clear stderr message. |
 | **MCP auto-call** ✅ | Agents can now self-call MCP skills. `skill.yaml` gained an `mcp: { tool }` block — a skill with it is an MCP skill, one with a `SKILL.md` is behavioural (mutually exclusive). The Bus, for an agent whose allowlist includes an MCP skill, writes a per-agent `mcp.json`, mounts Hira's `hira-skills` server via `--mcp-config`, and adds `mcp__hira-skills__<tool>` to the allowlist. Planner and Solution Architect now list `spec-consistency` and self-check before handing off. Verified end-to-end: the Planner invoked `spec_consistency_check` mid-Run. |
 | **M1.4 — Resume** ✅ | `hira runs resume <run_id>` recovers an interrupted (`running` / `failed`, not yet decided) Run from the journal. It reconstructs the plan from the original Planner hand-off and reuses completed self-contained task results — Knowledge and Architect (`RESUMABLE_OWNERS`) — via the Executor's `priorResults` map, so the expensive research/design phase is not re-paid. Developer / Tester / Reviewer always re-run fresh (their worktree state is lost on a crash). `createRunWorktree` is idempotent — it cleans up a stale worktree/branch first. The post-plan pipeline (`runPipeline`) is shared by `hira run` and `hira runs resume`. |
 | **M1.4+ — Live progress streaming** ✅ | The Session driver takes an `onEvent` callback; the Bus streams each parsed stream-json event into the journal as a compact `handoff_progress` entry (`started` / `tool` / `message`). A hand-off that never completes (a crash) now shows how far the agent got — `hira runs show` prints the progress trail for `in_progress` hand-offs. The journal serialises all appends through a write queue so fire-and-forget progress events cannot interleave with the awaited `completeHandoff`. |
@@ -835,9 +836,11 @@ that defers it).
   exhausts the Pro/Max 5-hour window will fail mid-stream; budget +
   back-off + `switch-to-api-key` opt-in are M3 work (§4.7).
 
-- **Per-Run budgets are advisory only.** `manifest.budgets.max_turns`
-  and `max_tokens` are not enforced; a runaway agent runs until the
-  per-check timeout or external kill. Hard budget enforcement is M3.
+- **Per-agent token/turn budgets are advisory only.** `hira.config.json`
+  `budgets.per_run.max_handoffs` + `max_wall_clock_s` are enforced
+  (M3.a — `BudgetTracker` throws `BudgetExhausted` on the next dispatch).
+  `manifest.budgets.max_turns` and `max_tokens` (per-agent caps) are still
+  advisory — token counting needs observability we don't ingest yet.
 
 - **JSONL memory store ceiling.** Recall is keyword-only (weighted
   tag / title / body) and load is O(records); fine to ~500 records or
@@ -854,10 +857,12 @@ that defers it).
   (`hira/run-<short>`) for inspection; the user runs `git merge`
   themselves. A `--merge` flag is deliberate-future-work.
 
-- **No schema validation on agent fenced-JSON outputs.** Each agent's
-  output shape is declared in its system prompt; the runtime parses
-  tolerantly (returns `null` on malformed and surfaces a warning).
-  Validation against the agent manifest's `outputs.schema` is M3.
+- **Input-side schema validation is not done yet.** Output validation
+  is enforced in M3.a — every built-in agent has an `outputs.schema.json`
+  and the Bus discards an invalid response (the precise error lands as
+  `handoff_completed.schema_error`). The mirror — validating each
+  hand-off envelope's `payload` against the *target* agent's input
+  schema — is deferred to a later M3 slice.
 
 - **CLI only.** No HTTP API, no web UI, no GitHub PR surface — M4.
 

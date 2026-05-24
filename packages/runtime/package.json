@@ -20,6 +20,7 @@
     "@hira/journal": "workspace:*",
     "@hira/memory": "workspace:*",
     "@hira/plugin-loader": "workspace:*",
-    "@hira/session": "workspace:*"
+    "@hira/session": "workspace:*",
+    "ajv": "^8.17.1"
   }
 }

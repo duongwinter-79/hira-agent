@@ -12,6 +12,8 @@ export type LoadedAgent = {
   manifest: AgentManifest;
   dir: string;
   systemPrompt: string;
+  /** Parsed JSON Schema from `manifest.outputs.schema`, when one is declared. */
+  outputSchema?: unknown;
 };
 
 export type LoadedSkill = {
@@ -49,7 +51,31 @@ async function loadAgents(dir: string): Promise<LoadedAgent[]> {
     const manifest = result.data;
     const promptPath = resolve(agentDir, manifest.prompt);
     const systemPrompt = await readFile(promptPath, 'utf8').catch(() => '');
-    agents.push({ manifest, dir: agentDir, systemPrompt });
+
+    let outputSchema: unknown;
+    if (manifest.outputs?.schema) {
+      const schemaPath = resolve(agentDir, manifest.outputs.schema);
+      const schemaRaw = await readFile(schemaPath, 'utf8').catch(() => null);
+      if (schemaRaw === null) {
+        throw new Error(
+          `Agent '${manifest.name}' declares outputs.schema '${manifest.outputs.schema}' but the file is missing at ${schemaPath}`,
+        );
+      }
+      try {
+        outputSchema = JSON.parse(schemaRaw);
+      } catch (err) {
+        throw new Error(
+          `Agent '${manifest.name}' outputs.schema at ${schemaPath} is not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+
+    agents.push({
+      manifest,
+      dir: agentDir,
+      systemPrompt,
+      ...(outputSchema !== undefined ? { outputSchema } : {}),
+    });
   }
   return agents.sort((a, b) => a.manifest.name.localeCompare(b.manifest.name));
 }

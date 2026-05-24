@@ -4,6 +4,8 @@ import { fileURLToPath } from 'node:url';
 import { statSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import {
+  BudgetExhausted,
+  BudgetTracker,
   Bus,
   Executor,
   Journal,
@@ -17,6 +19,7 @@ import {
   finalizeWorktree,
   isGitRepo,
   loadBehaviouralSkills,
+  loadBudgetConfig,
   loadPlugins,
   loadVerificationConfig,
   loadWorktreeSetupCommand,
@@ -141,6 +144,11 @@ program
       const journal = new Journal(project);
       const run = await journal.openRun(message);
       const driver = new SessionDriver();
+
+      // Per-Run budget tracker (SPEC §9). Null config → no caps enforced.
+      const budgetCfg = await loadBudgetConfig(project);
+      const budget = budgetCfg ? new BudgetTracker(budgetCfg) : undefined;
+
       const bus = new Bus({
         agents,
         skills,
@@ -149,6 +157,7 @@ program
         driver,
         binary: opts.binary,
         ...(mcpSkillsServer ? { mcpSkillsServerPath: mcpSkillsServer } : {}),
+        ...(budget ? { budget } : {}),
       });
 
       try {
@@ -308,6 +317,7 @@ runs
         console.log(`      exit_code: ${h.exit_code}`);
       }
       if (h.session_id) console.log(`      session_id: ${h.session_id}`);
+      if (h.schema_error) console.log(`      schema_error: ${h.schema_error}`);
       if (h.response_text) {
         const oneLine = h.response_text.replace(/\s+/g, ' ').trim();
         console.log(
@@ -565,6 +575,10 @@ runs
       const pluginsRoot = resolvePluginsRoot(opts.pluginsRoot);
       const { agents, skills } = await loadPlugins(pluginsRoot);
       const driver = new SessionDriver();
+
+      const budgetCfg = await loadBudgetConfig(project);
+      const budget = budgetCfg ? new BudgetTracker(budgetCfg) : undefined;
+
       const bus = new Bus({
         agents,
         skills,
@@ -575,6 +589,7 @@ runs
         ...(resolveMcpSkillsServer(pluginsRoot)
           ? { mcpSkillsServerPath: resolveMcpSkillsServer(pluginsRoot) }
           : {}),
+        ...(budget ? { budget } : {}),
       });
 
       process.stderr.write(
@@ -964,6 +979,9 @@ async function runPipeline(args: PipelineArgs): Promise<void> {
     console.error(`(run_id: ${runId})`);
   } catch (err) {
     if (worktree) await finalizeWorktree(project, worktree).catch(() => undefined);
+    if (err instanceof BudgetExhausted) {
+      process.stderr.write(`(${err.message}; halting Run)\n`);
+    }
     await journal.closeRun(runId, 'failed').catch(() => undefined);
     throw err;
   }

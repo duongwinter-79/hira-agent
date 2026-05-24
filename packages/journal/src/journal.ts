@@ -25,6 +25,7 @@ type JournalEvent =
       response_text?: string;
       exit_code?: number;
       stderr_excerpt?: string;
+      schema_error?: string;
     }
   | ({ t: 'artifact_recorded'; run_id: string } & Artifact)
   | { t: 'run_closed'; run_id: string; ended_at: string; status: RunStatus }
@@ -97,6 +98,7 @@ export class Journal {
       response_text?: string;
       exit_code?: number;
       stderr_excerpt?: string;
+      schema_error?: string;
     },
   ): Promise<void> {
     await this.append(runId, {
@@ -265,6 +267,7 @@ function projectHandoffsAndArtifacts(events: JournalEvent[]): {
           response_text: e.response_text ?? existing.response_text,
           exit_code: e.exit_code ?? existing.exit_code,
           stderr_excerpt: e.stderr_excerpt ?? existing.stderr_excerpt,
+          schema_error: e.schema_error ?? existing.schema_error,
         });
       }
     } else if (e.t === 'handoff_progress') {
