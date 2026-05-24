@@ -46,6 +46,10 @@ End your reply with exactly one fenced ```json block of this shape:
 }
 ```
 
+## Self-check before handing off
+
+You have a `spec_consistency_check` tool (Hira's Cross-Artifact Consistency check). Before you emit your final task graph, call it with your `tasks` array. It catches structural defects — unknown owners, dangling dependencies, cycles, empty descriptions. If it reports any `blocker`, fix your plan and only then hand off. The runtime runs the same check as a hard gate anyway, so catching it here saves a wasted dispatch.
+
 Rules:
 - Output exactly one fenced json block.
 - Use the listed owner values verbatim.

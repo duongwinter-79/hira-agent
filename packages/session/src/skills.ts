@@ -65,6 +65,31 @@ export function composeSystemPrompt(
   return [...sections, agentSystemPrompt.trim()].join('\n\n');
 }
 
+/** A model-callable MCP skill resolved from an agent's allowlist. */
+export type McpSkillRef = {
+  /** Skill name (matches the agent manifest's `skills` entry). */
+  name: string;
+  /** The MCP tool name the skill exposes. */
+  tool: string;
+};
+
+/**
+ * Resolve the MCP skills (those with an `mcp` block in their manifest)
+ * from an agent's skill allowlist. Behavioural skills are ignored here —
+ * `loadBehaviouralSkills` handles those.
+ */
+export function resolveMcpSkills(loaded: LoadedSkill[], allowlist: string[]): McpSkillRef[] {
+  const byName = new Map(loaded.map((s) => [s.manifest.name, s]));
+  const out: McpSkillRef[] = [];
+  for (const name of allowlist) {
+    const skill = byName.get(name);
+    if (skill?.manifest.mcp) {
+      out.push({ name, tool: skill.manifest.mcp.tool });
+    }
+  }
+  return out;
+}
+
 /** Strip a leading YAML frontmatter block delimited by --- lines. */
 function stripFrontmatter(raw: string): string {
   if (!raw.startsWith('---')) return raw;

@@ -1,0 +1,8 @@
+name: spec-consistency
+version: 1.0.0
+kind: skill
+# Model-callable MCP skill (SPEC §4.6, §4.8). Hosted by Hira's built-in
+# MCP server (@hira/mcp-skills). Agents that list this skill get the
+# spec_consistency_check tool mounted into their session.
+mcp:
+  tool: spec_consistency_check

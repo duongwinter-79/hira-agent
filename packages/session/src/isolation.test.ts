@@ -55,4 +55,34 @@ describe('prepareAgentIsolation', () => {
     });
     expect((await stat(agentDir)).isDirectory()).toBe(true);
   });
+
+  it('writes mcp.json when an MCP server is requested', async () => {
+    const runDir = await makeRunDir();
+    const result = await prepareAgentIsolation({
+      runDir,
+      agentName: 'planner',
+      allowedTools: ['Read', 'mcp__hira-skills__spec_consistency_check'],
+      mcpServer: {
+        name: 'hira-skills',
+        command: 'node',
+        args: ['/install/server.js'],
+        env: { HIRA_PROJECT_ROOT: '/proj' },
+      },
+    });
+    expect(result.mcpConfigPath).toBe(join(result.agentDir, 'mcp.json'));
+    const mcp = JSON.parse(await readFile(result.mcpConfigPath!, 'utf8'));
+    expect(mcp.mcpServers['hira-skills'].command).toBe('node');
+    expect(mcp.mcpServers['hira-skills'].args).toEqual(['/install/server.js']);
+    expect(mcp.mcpServers['hira-skills'].env.HIRA_PROJECT_ROOT).toBe('/proj');
+  });
+
+  it('omits mcp.json when no MCP server is requested', async () => {
+    const runDir = await makeRunDir();
+    const result = await prepareAgentIsolation({
+      runDir,
+      agentName: 'planner',
+      allowedTools: [],
+    });
+    expect(result.mcpConfigPath).toBeUndefined();
+  });
 });

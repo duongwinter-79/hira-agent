@@ -319,7 +319,8 @@ hira-agent/
 │   │   ├── knowledge/
 │   │   └── memory/
 │   └── skills/
-│       └── karpathy-guidelines/  # behavioural skill (SKILL.md format)
+│       ├── karpathy-guidelines/  # behavioural skill (SKILL.md, inlined into prompts)
+│       └── spec-consistency/     # MCP skill (model-callable tool)
 ├── packages/                   # pnpm workspace
 │   ├── plugin-loader/          # @hira/plugin-loader  (zod-validated manifest discovery)
 │   ├── session/                # @hira/session        (claude CLI subprocess driver, isolation, skill resolver)

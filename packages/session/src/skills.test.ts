@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { LoadedSkill } from '@hira/plugin-loader';
-import { loadBehaviouralSkills, composeSystemPrompt } from './skills.js';
+import { loadBehaviouralSkills, composeSystemPrompt, resolveMcpSkills } from './skills.js';
 
 async function tmpSkill(name: string, content: string): Promise<LoadedSkill> {
   const root = await mkdtemp(join(tmpdir(), 'hira-skill-'));
@@ -73,5 +73,39 @@ describe('composeSystemPrompt', () => {
     expect(firstIdx).toBeGreaterThanOrEqual(0);
     expect(secondIdx).toBeGreaterThan(firstIdx);
     expect(agentIdx).toBeGreaterThan(secondIdx);
+  });
+});
+
+describe('resolveMcpSkills', () => {
+  const mcpSkill: LoadedSkill = {
+    dir: '/fake/spec-consistency',
+    manifest: {
+      name: 'spec-consistency',
+      version: '1.0.0',
+      kind: 'skill',
+      mcp: { tool: 'spec_consistency_check' },
+    },
+  };
+  const behaviouralSkill: LoadedSkill = {
+    dir: '/fake/karpathy',
+    manifest: { name: 'karpathy-guidelines', version: '1.0.0', kind: 'skill' },
+  };
+
+  it('returns only skills with an mcp block from the allowlist', () => {
+    const out = resolveMcpSkills(
+      [mcpSkill, behaviouralSkill],
+      ['karpathy-guidelines', 'spec-consistency'],
+    );
+    expect(out).toEqual([{ name: 'spec-consistency', tool: 'spec_consistency_check' }]);
+  });
+
+  it('returns [] when the allowlist has no MCP skills', () => {
+    expect(resolveMcpSkills([behaviouralSkill], ['karpathy-guidelines'])).toEqual([]);
+  });
+
+  it('ignores allowlist entries that are not loaded', () => {
+    expect(resolveMcpSkills([mcpSkill], ['spec-consistency', 'ghost'])).toEqual([
+      { name: 'spec-consistency', tool: 'spec_consistency_check' },
+    ]);
   });
 });

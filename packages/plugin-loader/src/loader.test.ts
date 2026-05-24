@@ -72,4 +72,17 @@ describe('loadPlugins', () => {
     expect(plugins.agents).toEqual([]);
     expect(plugins.skills).toEqual([]);
   });
+
+  it('parses a skill manifest with an mcp block', async () => {
+    const root = await makeRoot();
+    const dir = join(root, 'plugins', 'skills', 'spec-consistency');
+    await mkdir(dir, { recursive: true });
+    await writeFile(
+      join(dir, 'skill.yaml'),
+      ['name: spec-consistency', 'version: 1.0.0', 'kind: skill', 'mcp:', '  tool: spec_consistency_check'].join('\n'),
+    );
+    const plugins = await loadPlugins(root);
+    expect(plugins.skills).toHaveLength(1);
+    expect(plugins.skills[0]!.manifest.mcp).toEqual({ tool: 'spec_consistency_check' });
+  });
 });

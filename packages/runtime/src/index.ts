@@ -20,6 +20,7 @@ export {
   extractAssistantText,
   prepareAgentIsolation,
   loadBehaviouralSkills,
+  resolveMcpSkills,
   composeSystemPrompt,
 } from '@hira/session';
 export type {
@@ -33,6 +34,8 @@ export type {
   ResultEvent,
   IsolationRequest,
   IsolationArtifacts,
+  McpServerConfig,
+  McpSkillRef,
   RenderedBehaviouralSkill,
 } from '@hira/session';
 
