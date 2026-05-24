@@ -375,6 +375,80 @@ its consequences (tasks, patches, tests) and backward from any patch or
 test failure to the requirement that produced it. Same data, queryable
 from either end.
 
+### 4.10 Run lifecycle
+
+What `hira run "<goal>"` actually does today, end to end. Every step is
+recorded in the journal (`.hira/runs/<run_id>/journal.jsonl`), live
+progress events stream as the agents run, and the chain is walkable via
+`hira runs trace`.
+
+```
+$ hira run "<goal>"
+
+  1. user → orchestrator   [classify]
+       Emits a fenced JSON decision:
+         {action: "reply",    message}                      → skip to 6
+         {action: "dispatch", target: "planner", payload}
+
+  2. orchestrator → planner [decompose]
+       Returns a task graph. May self-call spec_consistency_check
+       (mounted via MCP — §4.6).
+
+  3. memory query
+       Baseline memory records (§5.8) relevant to the intent are
+       injected as memory_context[] into every downstream task payload.
+
+  4. Executor walks the task graph in dependency order:
+
+       a. knowledge / solution-architect
+            Read-only specialists, cwd = project root.
+            Architect may also self-call spec_consistency_check.
+
+       b. Cross-Artifact Consistency gate (§4.8)
+            Runs once, before the first Developer task. A `blocked`
+            report halts dispatch — Developer + downstream skipped.
+
+       c. developer
+            Real Edit/Write/Bash, scoped to a fresh git worktree at
+            .hira/runs/<run_id>/worktree/ on a branch hira/run-<short>.
+
+       d. deterministic Verification Engine (§4.8)
+            Runs the project's hira.config.json checks against the
+            worktree. `fail` → Developer re-runs once with the
+            verification_failure attached. Still failing → hard gate,
+            downstream skipped.
+
+       e. tester / reviewer
+            Read-only, cwd = worktree, so they see the actual diff.
+            Reviewer sees the verification report on its input.
+
+  5. memory maintainer
+       Reads the chain, proposes ADR / outcome records — staged as a
+       delta in .hira/runs/<run_id>/deltas/memory.json. Baseline
+       memory is NOT modified yet (§4.8 delta state machine).
+
+  6. user → orchestrator   [synthesise]
+       Composes the user-facing reply summarising what was decided,
+       what the verification gate said, the worktree branch (if any),
+       and the staged memory delta.
+
+  7. finalize
+       Worktree changes are committed to branch hira/run-<short>;
+       the worktree directory is removed (the branch persists for
+       inspection). The Run closes status=succeeded, approval=pending.
+
+  8. user decides
+       `hira runs approve <run_id>` folds the memory delta into
+       baseline memory and reports the worktree branch for manual
+       merge. `hira runs reject` discards the delta and deletes the
+       branch. Decisions are immutable.
+
+A direct-reply Run stops at step 1; an unapproved Run stops at step 7
+with the deltas on disk but the baseline untouched. A crashed Run
+(`status: running` with no `run_closed`) can be re-entered via
+`hira runs resume <run_id>` — see §14 for what that reuses.
+```
+
 ---
 
 ## 5. Agent Catalog (v1)
@@ -725,3 +799,70 @@ runs:
 - Non-Claude model backends.
 - Fine-tuning or RLHF loops on past runs.
 - Auto-merging PRs without human approval.
+
+---
+
+## 14. Limitations (current behaviour)
+
+What Hira does today, but with caveats a user should know. Each
+limitation links to where it gets addressed (or to the open question
+that defers it).
+
+- **Resume can't continue a mid-Developer crash.** `hira runs resume`
+  reuses completed Knowledge / Architect results, but Developer-onward
+  re-runs fresh. Continuing the Developer's *session* would require
+  dropping `--no-session-persistence` and validating `--resume`
+  durability (§12 #12).
+
+- **Non-git projects degrade to read-only mode.** The Developer's
+  worktree-based real-edit path (§4.8 / M1.5.b) requires `git`. In a
+  non-git project the Developer stays dry-mode and the engine verifies
+  the baseline rather than a diff.
+
+- **CLAUDE.md auto-discovery from `--cwd` is not suppressed.** Agent
+  isolation suppresses inherited settings / hooks / permissions
+  (`--setting-sources ""`), but Claude Code still discovers any
+  `CLAUDE.md` rooted at the agent's working directory. Fine in
+  practice — Orchestrator has no tools, worktree agents work on a
+  clean tree — but worth knowing if a project drops a CLAUDE.md that
+  would mislead an agent.
+
+- **Single Anthropic identity per host.** `claude login` lives in one
+  place on disk; Hira cannot fan out across multiple accounts to
+  multiply throughput.
+
+- **Subscription rate windows are not handled.** A long Run that
+  exhausts the Pro/Max 5-hour window will fail mid-stream; budget +
+  back-off + `switch-to-api-key` opt-in are M3 work (§4.7).
+
+- **Per-Run budgets are advisory only.** `manifest.budgets.max_turns`
+  and `max_tokens` are not enforced; a runaway agent runs until the
+  per-check timeout or external kill. Hard budget enforcement is M3.
+
+- **JSONL memory store ceiling.** Recall is keyword-only (weighted
+  tag / title / body) and load is O(records); fine to ~500 records or
+  ~100 ms query latency, then SQLite + FTS5 / vector index in M2.b.
+
+- **No ambiguity detection in the Consistency check.** The MCP skill
+  catches structural defects (unknown owner, dangling dep, cycle,
+  empty description) and ADR overlap; "vague acceptance criteria" is
+  judgement-heavy and deliberately left to the agents' own reasoning
+  (§12 #15 closed with this rationale).
+
+- **`hira runs approve` does not auto-merge code.** It folds memory
+  deltas into baseline and reports the worktree branch
+  (`hira/run-<short>`) for inspection; the user runs `git merge`
+  themselves. A `--merge` flag is deliberate-future-work.
+
+- **No schema validation on agent fenced-JSON outputs.** Each agent's
+  output shape is declared in its system prompt; the runtime parses
+  tolerantly (returns `null` on malformed and surfaces a warning).
+  Validation against the agent manifest's `outputs.schema` is M3.
+
+- **CLI only.** No HTTP API, no web UI, no GitHub PR surface — M4.
+
+- **Concurrency is unrestricted in principle, untested in practice.**
+  The Executor is sequential today; parallel fan-out (e.g. two
+  Reviewers) at the same depth would share the same subscription pool
+  with no semaphore. §12 #13 defers the decision until real quota
+  behaviour is observed.
