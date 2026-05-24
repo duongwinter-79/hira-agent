@@ -89,6 +89,9 @@ importers:
       '@hira/session':
         specifier: workspace:*
         version: link:../session
+      ajv:
+        specifier: ^8.17.1
+        version: 8.20.0
 
   packages/session:
     dependencies:

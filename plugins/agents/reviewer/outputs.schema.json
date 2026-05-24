@@ -1,0 +1,26 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Reviewer verdict",
+  "type": "object",
+  "required": ["verdict", "summary", "comments"],
+  "properties": {
+    "verdict": { "type": "string", "enum": ["approve", "request-changes"] },
+    "summary": { "type": "string", "minLength": 1 },
+    "comments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["severity"],
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": ["blocker", "major", "minor", "nit"]
+          },
+          "file": { "type": "string" },
+          "line": { "type": "number" },
+          "comment": { "type": "string" }
+        }
+      }
+    }
+  }
+}

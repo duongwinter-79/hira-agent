@@ -6,15 +6,18 @@ import { Journal, type Handoff } from '@hira/journal';
 import type { LoadedAgent, LoadedSkill } from '@hira/plugin-loader';
 import type { SessionInvocation, SessionResult, StreamEvent } from '@hira/session';
 import { Bus, type BusDriver } from './bus.js';
+import { BudgetTracker, BudgetExhausted } from './budget.js';
 
 function agent(
   name: string,
   escalates_to: string[] = [],
   skills: string[] = [],
+  outputSchema?: unknown,
 ): LoadedAgent {
   return {
     dir: '/fake/' + name,
     systemPrompt: `You are ${name}.`,
+    ...(outputSchema !== undefined ? { outputSchema } : {}),
     manifest: {
       name,
       version: '0.0.1',
@@ -36,6 +39,7 @@ function makeBus(opts: {
   journal: Journal;
   projectRoot: string;
   mcpSkillsServerPath?: string;
+  budget?: BudgetTracker;
 }): Bus {
   return new Bus({
     agents: opts.agents,
@@ -45,6 +49,7 @@ function makeBus(opts: {
     driver: opts.driver,
     binary: 'claude',
     ...(opts.mcpSkillsServerPath ? { mcpSkillsServerPath: opts.mcpSkillsServerPath } : {}),
+    ...(opts.budget ? { budget: opts.budget } : {}),
   });
 }
 
@@ -286,6 +291,81 @@ describe('Bus.dispatch', () => {
 
     await bus.dispatch(makeHandoff('orchestrator', 'planner', run.id));
     expect(captured.mcpConfig).toBeUndefined();
+  });
+
+  it('validates the response against the target agent outputs.schema', async () => {
+    const projectRoot = await mkdtemp(join(tmpdir(), 'hira-bus-'));
+    const journal = new Journal(projectRoot);
+    const run = await journal.openRun('test');
+
+    const schema = {
+      type: 'object',
+      required: ['action', 'message'],
+      properties: {
+        action: { const: 'reply' },
+        message: { type: 'string', minLength: 1 },
+      },
+    };
+
+    const bus = makeBus({
+      agents: [agent('orchestrator', [], [], schema)],
+      // Missing the required "message" field.
+      driver: fakeDriver('```json\n{"action":"reply"}\n```'),
+      journal,
+      projectRoot,
+    });
+
+    const result = await bus.dispatch(makeHandoff('user', 'orchestrator', run.id));
+    expect(result.response).toBeNull();
+    expect(result.schemaError).toBeDefined();
+    expect(result.schemaError).toMatch(/message/);
+
+    const data = await journal.getRun(run.id);
+    expect(data!.handoffs[0]!.schema_error).toBe(result.schemaError);
+  });
+
+  it('passes a response that matches outputs.schema', async () => {
+    const projectRoot = await mkdtemp(join(tmpdir(), 'hira-bus-'));
+    const journal = new Journal(projectRoot);
+    const run = await journal.openRun('test');
+
+    const schema = {
+      type: 'object',
+      required: ['action', 'message'],
+      properties: {
+        action: { const: 'reply' },
+        message: { type: 'string' },
+      },
+    };
+    const bus = makeBus({
+      agents: [agent('orchestrator', [], [], schema)],
+      driver: fakeDriver('```json\n{"action":"reply","message":"ok"}\n```'),
+      journal,
+      projectRoot,
+    });
+    const result = await bus.dispatch(makeHandoff('user', 'orchestrator', run.id));
+    expect(result.response).toEqual({ action: 'reply', message: 'ok' });
+    expect(result.schemaError).toBeUndefined();
+  });
+
+  it('throws BudgetExhausted when a per-Run cap is reached', async () => {
+    const projectRoot = await mkdtemp(join(tmpdir(), 'hira-bus-'));
+    const journal = new Journal(projectRoot);
+    const run = await journal.openRun('test');
+
+    const budget = new BudgetTracker({ max_handoffs: 1 });
+    const bus = makeBus({
+      agents: [agent('orchestrator')],
+      driver: fakeDriver('```json\n{}\n```'),
+      journal,
+      projectRoot,
+      budget,
+    });
+
+    await bus.dispatch(makeHandoff('user', 'orchestrator', run.id));
+    await expect(
+      bus.dispatch(makeHandoff('user', 'orchestrator', run.id)),
+    ).rejects.toBeInstanceOf(BudgetExhausted);
   });
 
   it('honours an options.tools override on the dispatched invocation', async () => {

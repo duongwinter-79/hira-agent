@@ -105,6 +105,12 @@ export type HandoffRecord = Handoff & {
   exit_code?: number;
   /** First 2 KB of stderr; full stderr is in the per-agent run dir. */
   stderr_excerpt?: string;
+  /**
+   * Schema-validation error from the agent's `outputs.schema`, when the
+   * fenced JSON reply failed validation. The hand-off completed but its
+   * structured `response` was discarded.
+   */
+  schema_error?: string;
   /** Live progress trail streamed while the hand-off ran. */
   progress?: HandoffProgress[];
 };

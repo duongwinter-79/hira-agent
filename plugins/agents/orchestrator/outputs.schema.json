@@ -1,0 +1,23 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Orchestrator output",
+  "type": "object",
+  "required": ["action"],
+  "oneOf": [
+    {
+      "properties": {
+        "action": { "const": "reply" },
+        "message": { "type": "string", "minLength": 1 }
+      },
+      "required": ["message"]
+    },
+    {
+      "properties": {
+        "action": { "const": "dispatch" },
+        "target": { "type": "string", "minLength": 1 },
+        "payload": {}
+      },
+      "required": ["target", "payload"]
+    }
+  ]
+}
